@@ -1,0 +1,68 @@
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+*.iml
+
+# Internal agent / process docs — never publish
+AGENTS.md
+agents.md
+CLAUDE.md
+PLAN.md
+requirements.md
+protocol/
+.agent-state/
+.agent-status/
+.agent/
+.brv/
+.workflows/
+.tmp/
+
+# Logos / icons — never publish
+**/logo*
+**/*logo*
+**/*.icns
+**/*.ico
+**/*.iconset/
+**/icon_*.png
+**/icon_*.svg
+**/assets/icons/
+**/mipmap-*/ic_launcher*
+
+# Rust
+desktop/target/
+**/target/
+**/*.rs.bk
+
+# Flutter / Android build
+android/.dart_tool/
+android/.flutter-plugins
+android/.flutter-plugins-dependencies
+android/.packages
+android/build/
+**/.gradle/
+**/build/
+**/captures/
+**/local.properties
+*.apk
+*.aab
+*.ipa
+
+# Desktop packaging
+**/dist/
+*.exe
+*.dmg
+*.app/
+
+# Secrets / env
+.env
+.env.*
+*.jks
+*.keystore
+*.key
+*.pem
+.venv/
+venv/
+__pycache__/
