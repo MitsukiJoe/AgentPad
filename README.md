@@ -196,6 +196,28 @@ If you encounter connection issues or unexpected behavior, access logs via the d
 
 ---
 
+## Automatic Update Mechanism
+
+AgentPad incorporates a lightweight and dependable cross-platform auto-update channel powered directly by GitHub Releases public APIs, free from third-party server dependencies:
+
+- **Visual Update Indicator**:
+  - The desktop pairing window permanently displays the running version number in the header alongside the listening port;
+  - When a newer release is detected, a **green status dot** and an interactive "**Update**" button appear. Hovering reveals the release notes.
+- **Windows (Dedicated Script & Safe Handover)**:
+  - Clicking "Update" generates a dedicated updater script (`agentpad_updater.bat`) in the application directory and spawns it in the background;
+  - The main process exits gracefully to release the executable file lock. The script waits for process termination, uses native `curl` to download the latest `agentpad-windows-x64.exe`, performs an in-place binary overwrite, restarts the new version, and self-destructs;
+  - The newly launched version performs a **startup security check**: it verifies the embedded signature of any leftover updater script before deleting it, preventing accidental removal of user files.
+- **macOS (Unix In-Place Atomic Replacement)**:
+  - When an update is ready, clicking "Update" downloads the pre-built application archive (`agentpad-macos-arm64.zip`) in the background;
+  - Leveraging macOS Unix inode replacement semantics, the extracted app atomically overwrites `/Applications/AgentPad.app` via system `ditto`;
+  - Spawns the new version via `open -n` and terminates the old process. The upgrade completes within 2 seconds without requiring manual DMG mounting.
+- **Android (In-App One-Tap Upgrade)**:
+  - The bottom of the Settings panel displays the current version and a "Check for Updates" button;
+  - Finding a new release prompts a dialog with release notes. Tapping "Download & Update" fetches the latest `agentpad.apk` and triggers the system package installer for a seamless upgrade, retaining all saved device pools and preferences.
+
+---
+
+
 ## Project Structure
 
 ```text

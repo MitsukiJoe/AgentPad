@@ -8,12 +8,14 @@ mod net;
 mod protocol;
 mod qr;
 mod ui;
+mod updater;
 mod ws;
 
 use std::net::SocketAddr;
 
 fn main() -> eframe::Result {
     autostart::apply();
+    updater::cleanup_stale_updater_script();
     let identity = identity::load();
     logutil::write(&format!(
         "start {} {} {} exe={}",

@@ -235,6 +235,17 @@ class WifiWs(
                         releaseWifiIfIdle()
                         result.success(true)
                     }
+                    "openUrl" -> {
+                        val url = call.argument<String>("url") ?: ""
+                        try {
+                            val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))
+                            intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                            ctx.startActivity(intent)
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("OPEN_FAILED", e.message, null)
+                        }
+                    }
                     "voiceEvidence" -> {
                         val manager = ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
                         result.success(

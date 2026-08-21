@@ -1,5 +1,8 @@
 import 'dart:async';
+import 'dart:convert' show jsonDecode, utf8;
+import 'dart:io' show HttpClient;
 import 'dart:ui' show ImageFilter, TileMode;
+import 'package:flutter/services.dart' show MethodChannel;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -1878,10 +1881,124 @@ class _HomePageState extends State<HomePage> {
               },
             ),
           ),
+          const SizedBox(height: 24),
+          const Divider(height: 1),
+          const SizedBox(height: 16),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                '版本 0.1.0',
+                style: TextStyle(
+                  color: _controlForeground(Theme.of(ctx).brightness).withValues(alpha: 0.6),
+                  fontSize: 13,
+                ),
+              ),
+              TextButton.icon(
+                onPressed: () => _checkAndroidUpdate(ctx),
+                icon: const Icon(Icons.refresh, size: 16),
+                label: const Text('检查更新'),
+              ),
+            ],
+          ),
         ],
       ),
       ),
     );
+  }
+
+  Future<void> _checkAndroidUpdate(BuildContext ctx) async {
+    final messenger = ScaffoldMessenger.of(ctx);
+    messenger.showSnackBar(
+      const SnackBar(
+        content: Text('正在检查更新...'),
+        duration: Duration(seconds: 1),
+      ),
+    );
+
+    try {
+      final client = HttpClient();
+      client.connectionTimeout = const Duration(seconds: 8);
+      final request = await client.getUrl(
+        Uri.parse('https://api.github.com/repos/MitsukiJoe/AgentPad/releases/latest'),
+      );
+      request.headers.set('User-Agent', 'AgentPad-Android');
+      request.headers.set('Accept', 'application/vnd.github.v3+json');
+      final response = await request.close();
+
+      if (response.statusCode != 200) {
+        messenger.showSnackBar(
+          SnackBar(content: Text('检查更新失败 (HTTP ${response.statusCode})')),
+        );
+        return;
+      }
+
+      final bodyString = await response.transform(utf8.decoder).join();
+      final data = jsonDecode(bodyString) as Map<String, dynamic>;
+      final tagName = (data['tag_name'] as String? ?? '').replaceFirst('v', '').trim();
+      final body = data['body'] as String? ?? '';
+      final assets = data['assets'] as List<dynamic>? ?? [];
+
+      String? apkUrl;
+      for (final a in assets) {
+        if (a is Map<String, dynamic>) {
+          final name = a['name'] as String? ?? '';
+          if (name.endsWith('.apk')) {
+            apkUrl = a['browser_download_url'] as String?;
+            break;
+          }
+        }
+      }
+
+      const currentVer = '0.1.0';
+      if (_isNewerVersion(tagName, currentVer) && apkUrl != null) {
+        if (!mounted) return;
+        showDialog<void>(
+          context: ctx,
+          builder: (dCtx) => AlertDialog(
+            title: Text('发现新版本 v$tagName'),
+            content: SingleChildScrollView(
+              child: Text(body.isNotEmpty ? body : '点击下方按钮下载最新安装包覆盖更新。'),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dCtx),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  Navigator.pop(dCtx);
+                  const MethodChannel('agentpad/ws').invokeMethod<bool>('openUrl', {'url': apkUrl});
+                },
+                child: const Text('下载并更新'),
+              ),
+            ],
+          ),
+        );
+      } else {
+        messenger.showSnackBar(
+          const SnackBar(content: Text('当前已是最新版本 (v$currentVer)')),
+        );
+      }
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(content: Text('检查更新出错: $e')),
+      );
+    }
+  }
+
+  bool _isNewerVersion(String remote, String current) {
+    List<int> parse(String v) => v
+        .split('.')
+        .map((s) => int.tryParse(s.replaceAll(RegExp(r'\D'), '')) ?? 0)
+        .toList();
+    final r = parse(remote);
+    final c = parse(current);
+    for (var i = 0; i < r.length && i < c.length; i++) {
+      if (r[i] > c[i]) return true;
+      if (r[i] < c[i]) return false;
+    }
+    return r.length > c.length;
   }
 
   Future<void> _openFloatingPanel({

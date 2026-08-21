@@ -37,6 +37,7 @@ pub struct PairingApp {
     sharing_enabled: bool,
     permission_expanded: bool,
     autostart_enabled: bool,
+    updater: Arc<crate::updater::Updater>,
 }
 
 impl PairingApp {
@@ -75,6 +76,9 @@ impl PairingApp {
                 None
             }
         };
+        let updater = Arc::new(crate::updater::Updater::new());
+        updater.check_for_updates();
+
         Self {
             state,
             nics,
@@ -94,6 +98,7 @@ impl PairingApp {
             sharing_enabled: false,
             permission_expanded: false,
             autostart_enabled: crate::autostart::enabled(),
+            updater,
         }
     }
 
@@ -308,6 +313,70 @@ impl eframe::App for PairingApp {
                                             .size(12.0)
                                             .color(muted),
                                     );
+                                    ui.add_space(6.0);
+                                    ui.label(
+                                        egui::RichText::new(format!("v{}", crate::updater::CURRENT_VERSION))
+                                            .size(12.0)
+                                            .color(muted),
+                                    );
+
+                                    let update_status = self.updater.status.lock().unwrap().clone();
+                                    match update_status {
+                                        crate::updater::UpdateStatus::Available(info) => {
+                                            ui.add_space(4.0);
+                                            let (udot, _) = ui.allocate_exact_size(
+                                                Vec2::splat(8.0),
+                                                egui::Sense::hover(),
+                                            );
+                                            ui.painter().circle_filled(
+                                                udot.center(),
+                                                3.0,
+                                                egui::Color32::from_rgb(116, 181, 128),
+                                            );
+                                            ui.add_space(1.0);
+                                            let update_btn = ui.add(
+                                                egui::Button::new(
+                                                    egui::RichText::new("可更新")
+                                                        .size(12.0)
+                                                        .color(egui::Color32::from_rgb(116, 181, 128))
+                                                        .underline(),
+                                                )
+                                                .frame(false),
+                                            );
+                                            if update_btn
+                                                .on_hover_text(format!("发现新版本 {}
+点击下载并自动更新", info.version))
+                                                .clicked()
+                                            {
+                                                self.updater.start_update(&info);
+                                            }
+                                        }
+                                        crate::updater::UpdateStatus::Updating(msg) => {
+                                            ui.add_space(4.0);
+                                            ui.label(
+                                                egui::RichText::new(msg)
+                                                    .size(12.0)
+                                                    .color(accent),
+                                            );
+                                        }
+                                        crate::updater::UpdateStatus::Failed(_) => {
+                                            ui.add_space(4.0);
+                                            if ui
+                                                .add(
+                                                    egui::Button::new(
+                                                        egui::RichText::new("检查更新")
+                                                            .size(12.0)
+                                                            .color(muted),
+                                                    )
+                                                    .frame(false),
+                                                )
+                                                .clicked()
+                                            {
+                                                self.updater.check_for_updates();
+                                            }
+                                        }
+                                        _ => {}
+                                    }
                                 });
                             });
                             ui.with_layout(
