@@ -1,0 +1,156 @@
+name: Build & Release
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.gitignore'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # 1. 自动计算并生成下一个版本 Tag（无 Tag 时从 v0.1.0 开始，之后每次推 main 自动递增 v0.1.1, v0.1.2...）
+  bump-version:
+    name: Auto Bump Version Tag
+    runs-on: ubuntu-latest
+    outputs:
+      new_tag: ${{ steps.tag_version.outputs.new_tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Bump version and push tag
+        id: tag_version
+        uses: mathieudutour/github-tag-action@v6.2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          initial_version: 0.1.0
+          default_bump: patch
+          tag_prefix: v
+
+  # 2. Windows 编译 (x64)
+  build-windows:
+    name: Build Windows (x64)
+    needs: bump-version
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build Windows executable
+        run: |
+          cargo build --manifest-path desktop/Cargo.toml -p agentpad --release --target x86_64-pc-windows-msvc
+          copy desktop\target\x86_64-pc-windows-msvc\release\agentpad.exe agentpad-windows-x64.exe
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-artifact
+          path: agentpad-windows-x64.exe
+          if-no-files-found: error
+
+  # 3. macOS 编译 (ARM64 Apple Silicon)
+  build-macos:
+    name: Build macOS (ARM64)
+    needs: bump-version
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Build macOS App & DMG
+        run: |
+          cargo build --manifest-path desktop/Cargo.toml -p agentpad --release --target aarch64-apple-darwin
+          APP="desktop/target/aarch64-apple-darwin/release/AgentPad.app"
+          mkdir -p "$APP/Contents/MacOS"
+          cp desktop/macos/Info.plist "$APP/Contents/Info.plist"
+          cp desktop/target/aarch64-apple-darwin/release/agentpad "$APP/Contents/MacOS/agentpad"
+          codesign --force --deep --sign - --identifier app.agentpad "$APP"
+          hdiutil create -volname "AgentPad" -srcfolder "$APP" -ov -format UDZO "agentpad-macos-arm64.dmg"
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-artifact
+          path: agentpad-macos-arm64.dmg
+          if-no-files-found: error
+
+  # 4. Android 编译 (APK)
+  build-android:
+    name: Build Android (APK)
+    needs: bump-version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Build Android Release APK
+        run: |
+          cd android
+          flutter pub get
+          flutter build apk --release
+          cp build/app/outputs/flutter-apk/app-release.apk ../agentpad.apk
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-artifact
+          path: agentpad.apk
+          if-no-files-found: error
+
+  # 5. 汇聚三端安装包并自动发布 GitHub Release
+  create-release:
+    name: Publish GitHub Release
+    needs: [bump-version, build-windows, build-macos, build-android]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: List downloaded artifacts
+        run: ls -lh agentpad-windows-x64.exe agentpad-macos-arm64.dmg agentpad.apk
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.bump-version.outputs.new_tag }}
+          name: AgentPad ${{ needs.bump-version.outputs.new_tag }}
+          generate_release_notes: true
+          files: |
+            agentpad-windows-x64.exe
+            agentpad-macos-arm64.dmg
+            agentpad.apk
