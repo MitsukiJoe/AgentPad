@@ -1,9 +1,8 @@
 <div align="center">
 
-<!-- Banner / Logo 预留占位 -->
+<!-- Banner / Meme -->
 <p align="center">
-  <span style="font-size: 72px;">📱🕹️💻</span>
-  <!-- <img src="assets/banner.png" alt="AgentPad Banner" width="720" /> -->
+  <img src="assets/meme-cn.jpg" alt="AgentPad Banner" width="420" />
 </p>
 
 # AgentPad
@@ -24,7 +23,7 @@
 
 </div>
 
-> **「等等！你还在每天像个苦行僧一样，在电脑屏幕前弓腰十几个小时吗？！」**  
+> **「等等！你还在每天像个“不是，哥们.jpg”一样，在电脑屏幕前弓腰十几个小时吗？！」**  
 > 颈椎僵硬？肩周酸痛？腰肌劳损？腰椎间盘突出亮起红灯？  
 > 难道进入了 AI 时代，我们还得为了每隔几分钟给桌面上跑着的 Agent 敲个回车确认，而献祭掉自己的整条脊椎？！  
 > **快停下！你不需要这样受罪！**  

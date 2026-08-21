@@ -20,9 +20,11 @@ protocol/
 .workflows/
 .tmp/
 
-# Logos / icons — never publish
-**/logo*
-**/*logo*
+# Design source files & raw app icons — never publish
+**/*.sketch
+**/*.psd
+**/*.ai
+**/*.fig
 **/*.icns
 **/*.ico
 **/*.iconset/
@@ -30,6 +32,10 @@ protocol/
 **/icon_*.svg
 **/assets/icons/
 **/mipmap-*/ic_launcher*
+
+# Allow public repository assets (logos, banners, screenshots)
+!assets/
+!assets/**
 
 # Rust
 desktop/target/

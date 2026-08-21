@@ -1,9 +1,8 @@
 <div align="center">
 
-<!-- Banner / Logo Placeholder -->
+<!-- Banner / Meme -->
 <p align="center">
-  <span style="font-size: 72px;">📱🕹️💻</span>
-  <!-- <img src="assets/banner.png" alt="AgentPad Banner" width="720" /> -->
+  <img src="assets/meme-en.jpg" alt="AgentPad Banner" width="420" />
 </p>
 
 # AgentPad
