@@ -24,7 +24,10 @@ pub struct PairingApp {
     selected_ip: String,
     last_nic_scan: Instant,
     qr_tex: Option<(String, u32, bool, TextureHandle)>,
-    _tray: Option<TrayIcon>,
+    tray: Option<TrayIcon>,
+    tray_dark: bool,
+    #[cfg(target_os = "windows")]
+    window_icon_dark: Option<bool>,
     mi_show: MenuItem,
     mi_pause: CheckMenuItem,
     mi_logs: MenuItem,
@@ -46,7 +49,6 @@ impl PairingApp {
         let theme = theme_from_str(&crate::identity::load_theme());
         cc.egui_ctx.set_theme(theme);
         apply_app_style(&cc.egui_ctx);
-
         let nics = net::list_nics();
         let selected_ip = net::default_ip(&nics).unwrap_or_default();
         let mi_show = MenuItem::new("显示配对码", true, None);
@@ -61,14 +63,15 @@ impl PairingApp {
             &PredefinedMenuItem::separator(),
             &mi_quit,
         ]);
-        let mut builder = TrayIconBuilder::new()
+        let tray_dark = match theme {
+            ThemePreference::Dark => true,
+            ThemePreference::Light => false,
+            ThemePreference::System => cc.egui_ctx.theme() == egui::Theme::Dark,
+        };
+        let builder = TrayIconBuilder::new()
             .with_tooltip("AgentPad")
             .with_menu(Box::new(menu))
-            .with_icon(tray_icon());
-        #[cfg(target_os = "macos")]
-        {
-            builder = builder.with_icon_as_template(true);
-        }
+            .with_icon(tray_icon(tray_dark));
         let tray = match builder.build() {
             Ok(t) => Some(t),
             Err(e) => {
@@ -77,7 +80,6 @@ impl PairingApp {
             }
         };
         let updater = Arc::new(crate::updater::Updater::new());
-        updater.check_for_updates();
 
         Self {
             state,
@@ -85,7 +87,10 @@ impl PairingApp {
             selected_ip,
             last_nic_scan: Instant::now(),
             qr_tex: None,
-            _tray: tray,
+            tray,
+            tray_dark,
+            #[cfg(target_os = "windows")]
+            window_icon_dark: None,
             mi_show,
             mi_pause,
             mi_logs,
@@ -99,6 +104,35 @@ impl PairingApp {
             permission_expanded: false,
             autostart_enabled: crate::autostart::enabled(),
             updater,
+        }
+    }
+
+    fn sync_desktop_icons(&mut self, _ctx: &egui::Context, _frame: &eframe::Frame, dark: bool) {
+        if dark != self.tray_dark {
+            if let Some(tray) = &self.tray {
+                if let Err(e) = tray.set_icon(Some(tray_icon(dark))) {
+                    crate::logutil::write(&format!("tray icon update failed: {e}"));
+                } else {
+                    self.tray_dark = dark;
+                }
+            } else {
+                self.tray_dark = dark;
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        if self.window_icon_dark != Some(dark) {
+            let icon = tray_icon_data(dark);
+            _ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(Arc::new(icon.clone()))));
+
+            if let Some(window) = _frame.winit_window() {
+                use winit::platform::windows::WindowExtWindows;
+                let taskbar_icon =
+                    winit::window::Icon::from_rgba(icon.rgba, icon.width, icon.height)
+                        .expect("valid taskbar icon");
+                window.set_taskbar_icon(Some(taskbar_icon));
+            }
+            self.window_icon_dark = Some(dark);
         }
     }
 
@@ -249,6 +283,7 @@ impl eframe::App for PairingApp {
             )));
         }
         let dark = ui.visuals().dark_mode;
+        self.sync_desktop_icons(&ctx, frame, dark);
         let page = if dark {
             egui::Color32::from_rgb(20, 20, 20)
         } else {
@@ -324,19 +359,9 @@ impl eframe::App for PairingApp {
                                     match update_status {
                                         crate::updater::UpdateStatus::Available(info) => {
                                             ui.add_space(4.0);
-                                            let (udot, _) = ui.allocate_exact_size(
-                                                Vec2::splat(8.0),
-                                                egui::Sense::hover(),
-                                            );
-                                            ui.painter().circle_filled(
-                                                udot.center(),
-                                                3.0,
-                                                egui::Color32::from_rgb(116, 181, 128),
-                                            );
-                                            ui.add_space(1.0);
                                             let update_btn = ui.add(
                                                 egui::Button::new(
-                                                    egui::RichText::new("可更新")
+                                                    egui::RichText::new(format!("更新到 v{}", info.version))
                                                         .size(12.0)
                                                         .color(egui::Color32::from_rgb(116, 181, 128))
                                                         .underline(),
@@ -344,12 +369,19 @@ impl eframe::App for PairingApp {
                                                 .frame(false),
                                             );
                                             if update_btn
-                                                .on_hover_text(format!("发现新版本 {}
-点击下载并自动更新", info.version))
+                                                .on_hover_text("确认下载并安装此版本")
                                                 .clicked()
                                             {
                                                 self.updater.start_update(&info);
                                             }
+                                        }
+                                        crate::updater::UpdateStatus::Checking => {
+                                            ui.add_space(4.0);
+                                            ui.label(
+                                                egui::RichText::new("检查中...")
+                                                    .size(12.0)
+                                                    .color(muted),
+                                            );
                                         }
                                         crate::updater::UpdateStatus::Updating(msg) => {
                                             ui.add_space(4.0);
@@ -359,12 +391,19 @@ impl eframe::App for PairingApp {
                                                     .color(accent),
                                             );
                                         }
-                                        crate::updater::UpdateStatus::Failed(_) => {
+                                        status @ (crate::updater::UpdateStatus::Idle
+                                        | crate::updater::UpdateStatus::UpToDate
+                                        | crate::updater::UpdateStatus::Failed(_)) => {
                                             ui.add_space(4.0);
+                                            let label = match status {
+                                                crate::updater::UpdateStatus::UpToDate => "已是最新 · 重新检查",
+                                                crate::updater::UpdateStatus::Failed(_) => "检查失败 · 重试",
+                                                _ => "检查更新",
+                                            };
                                             if ui
                                                 .add(
                                                     egui::Button::new(
-                                                        egui::RichText::new("检查更新")
+                                                        egui::RichText::new(label)
                                                             .size(12.0)
                                                             .color(muted),
                                                     )
@@ -375,7 +414,6 @@ impl eframe::App for PairingApp {
                                                 self.updater.check_for_updates();
                                             }
                                         }
-                                        _ => {}
                                     }
                                 });
                             });
@@ -687,6 +725,9 @@ enum PermissionNotice {
     NeedsAccess,
 }
 
+const ICON_WHITE_PNG: &[u8] = include_bytes!("../assets/icon_white.png");
+const ICON_BLACK_PNG: &[u8] = include_bytes!("../assets/icon_black.png");
+
 fn permission_notice(packaged: bool, ax_ok: bool) -> Option<PermissionNotice> {
     if !packaged {
         Some(PermissionNotice::DevelopmentLaunch)
@@ -802,53 +843,28 @@ fn cjk_font_bytes() -> Option<Vec<u8>> {
     None
 }
 
-fn tray_icon() -> Icon {
-    let s = 32u32;
-    let mut rgba = vec![0u8; (s * s * 4) as usize];
-    for y in 0..s {
-        for x in 0..s {
-            let i = ((y * s + x) * 4) as usize;
-            if rounded_rect(x as i32, y as i32, 5, 5, 27, 27, 4) {
-                rgba[i] = 0;
-                rgba[i + 1] = 0;
-                rgba[i + 2] = 0;
-                rgba[i + 3] = 255;
-            }
-        }
-    }
-    Icon::from_rgba(rgba, s, s).expect("icon")
+fn tray_icon_data(dark: bool) -> egui::IconData {
+    let bytes = if dark { ICON_BLACK_PNG } else { ICON_WHITE_PNG };
+    eframe::icon_data::from_png_bytes(bytes).expect("valid tray icon")
 }
 
-fn rounded_rect(x: i32, y: i32, x0: i32, y0: i32, x1: i32, y1: i32, r: i32) -> bool {
-    if x < x0 || x >= x1 || y < y0 || y >= y1 {
-        return false;
-    }
-    let cx = if x < x0 + r {
-        x0 + r
-    } else if x >= x1 - r {
-        x1 - r - 1
-    } else {
-        return true;
-    };
-    let cy = if y < y0 + r {
-        y0 + r
-    } else if y >= y1 - r {
-        y1 - r - 1
-    } else {
-        return true;
-    };
-    if (x < x0 + r || x >= x1 - r) && (y < y0 + r || y >= y1 - r) {
-        let dx = x - cx;
-        let dy = y - cy;
-        dx * dx + dy * dy <= r * r
-    } else {
-        true
-    }
+fn tray_icon(dark: bool) -> Icon {
+    let icon = tray_icon_data(dark);
+    Icon::from_rgba(icon.rgba, icon.width, icon.height).expect("valid tray icon")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tray_theme_icons_are_distinct_and_high_resolution() {
+        let light = tray_icon_data(false);
+        let dark = tray_icon_data(true);
+        assert_eq!((light.width, light.height), (1024, 1024));
+        assert_eq!((dark.width, dark.height), (1024, 1024));
+        assert_ne!(light.rgba, dark.rgba);
+    }
 
     #[test]
     fn permission_notice_never_requests_access_for_bare_binary() {

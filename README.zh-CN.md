@@ -143,6 +143,23 @@ Agent 只是最佳客户；浏览器里查资料、聊天框里回消息、任�
 
 > 多台设备支持同时保持在线时，在左上角「已连接」面板可进行编辑、排序或删除。
 
+#### macOS 首次打开指南
+
+当前 macOS 构建采用 ad-hoc 代码签名分发，首次双击启动可能被 Gatekeeper 拦截（提示应用已损坏或来自未识别的开发者）。处理步骤，**无需关闭 Gatekeeper**：
+
+1. 首次双击被拦截后，进入「系统设置 → 隐私与安全性 → 安全性」；
+2. 在拦截提示处点击「仍要打开」（Open Anyway）；
+3. 输入密码或使用 Touch ID 确认；
+4. 之后每次均可正常打开，无需重复此流程。
+
+CLI 可选替代方案（仅限已确认从本项目官方 GitHub Release 下载构建的情况）：
+
+```bash
+xattr -dr com.apple.quarantine /path/to/AgentPad.app
+```
+
+> 无需关闭 Gatekeeper；不建议使用 `spctl --master-disable`（它会全局禁用系统验证）。
+
 ---
 
 
@@ -260,6 +277,21 @@ AgentPad/
 ├── README.md
 └── README.zh-CN.md
 ```
+
+## 代码签名政策
+
+AgentPad 计划在申请获批后，使用 SignPath 提供的免费代码签名服务为 Windows 产物签名；macOS 产物继续采用 ad-hoc 签名分发。
+
+- **申请状态**：准备申请（pending），尚未获批。在获批之前，macOS 构建采用 ad-hoc 签名分发，首次打开方式见上文「macOS 首次打开指南」。
+
+> Free code signing provided by SignPath.io, certificate by SignPath Foundation
+
+- **角色与职责**（当前均由同一人担任）：
+  - **Authors**：Miyue Qiao (@MitsukiJoe) —— 维护源码与构建脚本；
+  - **Reviewers**：Miyue Qiao (@MitsukiJoe) —— 审查源码、依赖和构建流程变更；
+  - **Approvers**：Miyue Qiao (@MitsukiJoe) —— 人工批准每一次签名请求。
+- **构建与签名流程**：Windows 产物由 GitHub Actions 从公开源码自动完成测试构建；在 SignPath 申请获批之后，该产物才会提交 SignPath 签名。
+- **隐私与数据边界**：无云、无账号、无遥测，局域网直连。程序不会向其他联网系统传输信息，除非用户或操作人员明确请求；用户手动检查更新时，程序会访问 GitHub Releases API。
 
 ---
 

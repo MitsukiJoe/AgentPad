@@ -5,6 +5,12 @@ edition = "2021"
 license = "AGPL-3.0-or-later"
 publish = false
 
+[build-dependencies]
+embedinator = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+winit = "0.30"
+
 [dependencies]
 agentpad-input = { path = "../agentpad-input" }
 arboard = "3"
@@ -17,5 +23,6 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
 tokio-tungstenite = "0.26"
 tray-icon = "0.21"
+ureq = { version = "2.12", default-features = false, features = ["native-tls"] }
 uuid = { version = "1", features = ["v4"] }
 whoami = "1"

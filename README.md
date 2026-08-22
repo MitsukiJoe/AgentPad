@@ -129,6 +129,23 @@ Launch desktop app → Ensure phone & PC are on the same LAN (or hotspot/VLAN) �
 
 > When multiple devices remain connected, manage, reorder, or delete them in the "Connected" panel.
 
+#### First Launch on macOS
+
+The current macOS build ships with ad-hoc code signing. The first double-click may be blocked by Gatekeeper (the app may be reported as damaged or from an unidentified developer). To proceed — **there is no need to disable Gatekeeper**:
+
+1. After the first double-click is blocked, open **System Settings → Privacy & Security → Security**;
+2. At the block notice, click **"Open Anyway"**;
+3. Confirm with your password or Touch ID;
+4. The app will open normally from then on — no further steps required.
+
+Optional CLI alternative (only if you can confirm the build was downloaded from this project's official GitHub Release):
+
+```bash
+xattr -dr com.apple.quarantine /path/to/AgentPad.app
+```
+
+> There is no need to disable Gatekeeper, and `spctl --master-disable` is not recommended (it turns off system-wide verification).
+
 ---
 
 ### 3. Start Using
@@ -233,6 +250,21 @@ AgentPad/
 ├── README.md
 └── README.zh-CN.md
 ```
+
+## Code signing policy
+
+Once the application is approved, AgentPad plans to use SignPath's free code signing service for Windows artifacts; macOS artifacts will continue to use ad-hoc signing.
+
+- **Status**: pending — the application is in preparation and has not been approved yet. Until approval, the macOS build ships with ad-hoc signing; see the "First Launch on macOS" guide above for the first-launch steps.
+
+> Free code signing provided by SignPath.io, certificate by SignPath Foundation
+
+- **Roles & responsibilities** (currently all held by the same person):
+  - **Authors**: Miyue Qiao (@MitsukiJoe) — maintains the source code and build scripts;
+  - **Reviewers**: Miyue Qiao (@MitsukiJoe) — reviews source, dependency, and build-pipeline changes;
+  - **Approvers**: Miyue Qiao (@MitsukiJoe) — manually approves every signing request.
+- **Build & signing flow**: The Windows artifact is automatically test-built by GitHub Actions from the public source code; it will be submitted to SignPath for signing only after the application is approved.
+- **Privacy & data boundary**: No cloud, no accounts, no telemetry — direct LAN connectivity only. The app never transmits information to any other networked system unless explicitly requested by the user or operator; when a user manually checks for updates, the app contacts the GitHub Releases API.
 
 ---
 

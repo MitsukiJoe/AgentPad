@@ -1,9 +1,14 @@
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const CURRENT_VERSION: &str = match option_env!("AGENTPAD_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
 pub const GITHUB_REPO: &str = "MitsukiJoe/AgentPad";
 
 #[derive(Clone, Debug, PartialEq)]
@@ -77,25 +82,24 @@ impl Updater {
 
 fn fetch_latest_release() -> Result<Option<UpdateInfo>, String> {
     let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
-    let output = Command::new("curl")
-        .args([
-            "-sL",
-            "--max-time",
-            "10",
-            "-H",
-            "User-Agent: AgentPad-Desktop",
-            "-H",
-            "Accept: application/vnd.github.v3+json",
-            &url,
-        ])
-        .output()
-        .map_err(|e| format!("执行 curl 失败: {e}"))?;
-
-    if !output.status.success() {
-        return Err(format!("网络请求失败: exit code {:?}", output.status.code()));
-    }
-
-    let json_text = String::from_utf8_lossy(&output.stdout);
+    let tls = ureq::native_tls::TlsConnector::new()
+        .map_err(|e| format!("初始化系统 TLS 失败: {e}"))?;
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(10))
+        .tls_connector(Arc::new(tls))
+        .build();
+    let response = agent
+        .get(&url)
+        .set("User-Agent", "AgentPad-Desktop")
+        .set("Accept", "application/vnd.github.v3+json")
+        .call()
+        .map_err(|e| format!("网络请求失败: {e}"))?;
+    let mut json_text = String::new();
+    response
+        .into_reader()
+        .take(2 * 1024 * 1024)
+        .read_to_string(&mut json_text)
+        .map_err(|e| format!("读取 GitHub 响应失败: {e}"))?;
     let v: serde_json::Value = serde_json::from_str(&json_text)
         .map_err(|e| format!("解析 GitHub 响应失败: {e}"))?;
 
@@ -290,5 +294,23 @@ pub fn cleanup_stale_updater_script() {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn updater_starts_idle() {
+        let updater = Updater::new();
+        assert_eq!(*updater.status.lock().unwrap(), UpdateStatus::Idle);
+    }
+
+    #[test]
+    fn compares_release_versions() {
+        assert!(is_newer_version("0.1.1", "0.1.0"));
+        assert!(!is_newer_version("0.1.0", "0.1.0"));
+        assert!(!is_newer_version("0.0.9", "0.1.0"));
     }
 }

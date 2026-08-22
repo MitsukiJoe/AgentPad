@@ -235,6 +235,54 @@ class WifiWs(
                         releaseWifiIfIdle()
                         result.success(true)
                     }
+                    "setAppIcon" -> {
+                        val icon = call.argument<String>("icon") ?: "white"
+                        try {
+                            val pm = ctx.packageManager
+                            val pkg = ctx.packageName
+                            val defaultComponent = android.content.ComponentName(pkg, "$pkg.MainActivity")
+                            val blackComponent = android.content.ComponentName(pkg, "$pkg.MainActivityBlack")
+
+                            val blackEnabled = pm.getComponentEnabledSetting(blackComponent) ==
+                                android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+                            val defaultEnabled = pm.getComponentEnabledSetting(defaultComponent) ==
+                                android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+                            if (icon == "black") {
+                                if (!blackEnabled) {
+                                    pm.setComponentEnabledSetting(
+                                        blackComponent,
+                                        android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                                        android.content.pm.PackageManager.DONT_KILL_APP
+                                    )
+                                }
+                                if (defaultEnabled) {
+                                    pm.setComponentEnabledSetting(
+                                        defaultComponent,
+                                        android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                                        android.content.pm.PackageManager.DONT_KILL_APP
+                                    )
+                                }
+                            } else {
+                                if (!defaultEnabled) {
+                                    pm.setComponentEnabledSetting(
+                                        defaultComponent,
+                                        android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                                        android.content.pm.PackageManager.DONT_KILL_APP
+                                    )
+                                }
+                                if (blackEnabled) {
+                                    pm.setComponentEnabledSetting(
+                                        blackComponent,
+                                        android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                                        android.content.pm.PackageManager.DONT_KILL_APP
+                                    )
+                                }
+                            }
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("ICON_CHANGE_FAILED", e.message, null)
+                        }
+                    }
                     "openUrl" -> {
                         val url = call.argument<String>("url") ?: ""
                         try {

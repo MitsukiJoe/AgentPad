@@ -13,33 +13,52 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  # 1. 自动计算并生成下一个版本 Tag（无 Tag 时从 v0.1.0 开始，之后每次推 main 自动递增 v0.1.1, v0.1.2...）
-  bump-version:
-    name: Auto Bump Version Tag
+  prepare-version:
+    name: Prepare Release Version
     runs-on: ubuntu-latest
     outputs:
-      new_tag: ${{ steps.tag_version.outputs.new_tag }}
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Bump version and push tag
-        id: tag_version
-        uses: mathieudutour/github-tag-action@v6.2
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          initial_version: 0.1.0
-          default_bump: patch
-          tag_prefix: v
+      - name: Calculate next patch version
+        id: version
+        shell: bash
+        run: |
+          baseline="0.1.0"
+          latest="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1)"
+          if [ -z "$latest" ]; then
+            version="$baseline"
+          else
+            current="${latest#v}"
+            IFS='.' read -r major minor patch <<< "$current"
+            if (( major == 0 && minor < 1 )); then
+              version="$baseline"
+            else
+              version="$major.$minor.$((patch + 1))"
+            fi
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "Preparing AgentPad v$version"
 
-  # 2. Windows 编译 (x64)
   build-windows:
     name: Build Windows (x64)
-    needs: bump-version
+    needs: prepare-version
     runs-on: windows-latest
+    env:
+      AGENTPAD_VERSION: ${{ needs.prepare-version.outputs.version }}
+      WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -49,10 +68,35 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      - name: Test desktop application
+        run: cargo test --manifest-path desktop/Cargo.toml -p agentpad
+
       - name: Build Windows executable
+        shell: pwsh
         run: |
           cargo build --manifest-path desktop/Cargo.toml -p agentpad --release --target x86_64-pc-windows-msvc
-          copy desktop\target\x86_64-pc-windows-msvc\release\agentpad.exe agentpad-windows-x64.exe
+          Copy-Item desktop\target\x86_64-pc-windows-msvc\release\agentpad.exe agentpad-windows-x64.exe
+
+      - name: Sign Windows executable
+        if: ${{ env.WINDOWS_CERTIFICATE_PFX_BASE64 != '' && env.WINDOWS_CERTIFICATE_PASSWORD != '' }}
+        shell: pwsh
+        run: |
+          $certificatePath = Join-Path $env:RUNNER_TEMP "agentpad-signing.pfx"
+          $certificateBytes = [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX_BASE64)
+          [IO.File]::WriteAllBytes($certificatePath, $certificateBytes)
+          $programFilesX86 = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)
+          $kitsRoot = Join-Path $programFilesX86 "Windows Kits\10\bin"
+          $signtool = Get-ChildItem "$kitsRoot\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $signtool) {
+            throw "signtool.exe was not found"
+          }
+          $signtoolPath = $signtool.FullName
+          & $signtoolPath sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f $certificatePath /p $env:WINDOWS_CERTIFICATE_PASSWORD agentpad-windows-x64.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $signtoolPath verify /pa /v agentpad-windows-x64.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
@@ -61,11 +105,17 @@ jobs:
           path: agentpad-windows-x64.exe
           if-no-files-found: error
 
-  # 3. macOS 编译 (ARM64 Apple Silicon)
   build-macos:
     name: Build macOS (ARM64)
-    needs: bump-version
+    needs: prepare-version
     runs-on: macos-latest
+    env:
+      AGENTPAD_VERSION: ${{ needs.prepare-version.outputs.version }}
+      MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+      APPLE_API_PRIVATE_KEY_BASE64: ${{ secrets.APPLE_API_PRIVATE_KEY_BASE64 }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -75,28 +125,101 @@ jobs:
         with:
           targets: aarch64-apple-darwin
 
-      - name: Build macOS App & DMG
+      - name: Import Developer ID certificate
+        if: ${{ env.MACOS_CERTIFICATE_P12_BASE64 != '' && env.MACOS_CERTIFICATE_PASSWORD != '' }}
+        id: signing
+        shell: bash
+        run: |
+          certificate_path="$RUNNER_TEMP/agentpad-signing.p12"
+          keychain_path="$RUNNER_TEMP/agentpad-signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          printf '%s' "$MACOS_CERTIFICATE_P12_BASE64" | openssl base64 -d -A -out "$certificate_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+          identity="$(security find-identity -v -p codesigning "$keychain_path" | awk -F '"' '/Developer ID Application/ { print $2; exit }')"
+          test -n "$identity" || { echo "Developer ID Application identity not found"; exit 1; }
+          echo "identity=$identity" >> "$GITHUB_OUTPUT"
+
+      - name: Test desktop application
+        run: cargo test --manifest-path desktop/Cargo.toml -p agentpad
+
+      - name: Build and sign macOS application
+        shell: bash
+        env:
+          SIGNING_IDENTITY: ${{ steps.signing.outputs.identity }}
         run: |
           cargo build --manifest-path desktop/Cargo.toml -p agentpad --release --target aarch64-apple-darwin
-          APP="desktop/target/aarch64-apple-darwin/release/AgentPad.app"
-          mkdir -p "$APP/Contents/MacOS"
-          cp desktop/macos/Info.plist "$APP/Contents/Info.plist"
-          cp desktop/target/aarch64-apple-darwin/release/agentpad "$APP/Contents/MacOS/agentpad"
-          codesign --force --deep --sign - --identifier app.agentpad "$APP"
-          hdiutil create -volname "AgentPad" -srcfolder "$APP" -ov -format UDZO "agentpad-macos-arm64.dmg"
+          app="desktop/target/aarch64-apple-darwin/release/AgentPad.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp desktop/macos/Info.plist "$app/Contents/Info.plist"
+          cp desktop/macos/AgentPad.icns "$app/Contents/Resources/AgentPad.icns"
+          cp desktop/target/aarch64-apple-darwin/release/agentpad "$app/Contents/MacOS/agentpad"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $AGENTPAD_VERSION" "$app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GITHUB_RUN_NUMBER" "$app/Contents/Info.plist"
+          if [ -n "$SIGNING_IDENTITY" ]; then
+            codesign --force --deep --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$app"
+          else
+            echo "Developer ID secret not configured; using ad-hoc signature"
+            codesign --force --deep --sign - --identifier app.agentpad "$app"
+          fi
+          codesign --verify --deep --strict --verbose=2 "$app"
+          ditto -c -k --sequesterRsrc --keepParent "$app" agentpad-macos-arm64.zip
+          hdiutil create -volname "AgentPad" -srcfolder "$app" -ov -format UDZO agentpad-macos-arm64.dmg
+          if [ -n "$SIGNING_IDENTITY" ]; then
+            codesign --force --timestamp --sign "$SIGNING_IDENTITY" agentpad-macos-arm64.dmg
+          fi
 
-      - name: Upload macOS artifact
+      - name: Notarize and package macOS artifacts
+        if: ${{ steps.signing.outputs.identity != '' && env.APPLE_API_KEY_ID != '' && env.APPLE_API_ISSUER_ID != '' && env.APPLE_API_PRIVATE_KEY_BASE64 != '' }}
+        shell: bash
+        env:
+          SIGNING_IDENTITY: ${{ steps.signing.outputs.identity }}
+        run: |
+          app="desktop/target/aarch64-apple-darwin/release/AgentPad.app"
+          key_path="$RUNNER_TEMP/AuthKey_$APPLE_API_KEY_ID.p8"
+          printf '%s' "$APPLE_API_PRIVATE_KEY_BASE64" | openssl base64 -d -A -out "$key_path"
+          xcrun notarytool submit agentpad-macos-arm64.zip \
+            --key "$key_path" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID" \
+            --wait
+          xcrun stapler staple "$app"
+          rm agentpad-macos-arm64.zip
+          ditto -c -k --sequesterRsrc --keepParent "$app" agentpad-macos-arm64.zip
+          hdiutil create -volname "AgentPad" -srcfolder "$app" -ov -format UDZO agentpad-macos-arm64.dmg
+          codesign --force --timestamp --sign "$SIGNING_IDENTITY" agentpad-macos-arm64.dmg
+          xcrun notarytool submit agentpad-macos-arm64.dmg \
+            --key "$key_path" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID" \
+            --wait
+          xcrun stapler staple agentpad-macos-arm64.dmg
+          xcrun stapler validate "$app"
+          xcrun stapler validate agentpad-macos-arm64.dmg
+
+      - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
         with:
           name: macos-artifact
-          path: agentpad-macos-arm64.dmg
+          path: |
+            agentpad-macos-arm64.dmg
+            agentpad-macos-arm64.zip
           if-no-files-found: error
 
-  # 4. Android 编译 (APK)
   build-android:
     name: Build Android (APK)
-    needs: bump-version
+    needs: prepare-version
     runs-on: ubuntu-latest
+    env:
+      AGENTPAD_VERSION: ${{ needs.prepare-version.outputs.version }}
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -104,20 +227,40 @@ jobs:
       - name: Setup Java JDK 21
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '21'
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          channel: 'stable'
+          channel: stable
           cache: true
 
-      - name: Build Android Release APK
+      - name: Configure Android release signing
+        if: ${{ env.ANDROID_KEYSTORE_BASE64 != '' && env.ANDROID_KEYSTORE_PASSWORD != '' && env.ANDROID_KEY_ALIAS != '' && env.ANDROID_KEY_PASSWORD != '' }}
+        shell: bash
         run: |
-          cd android
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/android/app/agentpad-release.jks
+          printf '%s\n' \
+            "storeFile=agentpad-release.jks" \
+            "storePassword=$ANDROID_KEYSTORE_PASSWORD" \
+            "keyAlias=$ANDROID_KEY_ALIAS" \
+            "keyPassword=$ANDROID_KEY_PASSWORD" \
+            > android/android/key.properties
+
+      - name: Test Android application
+        working-directory: android
+        run: |
           flutter pub get
-          flutter build apk --release
+          flutter test
+
+      - name: Build Android APK
+        working-directory: android
+        run: |
+          flutter build apk --release \
+            --build-name="$AGENTPAD_VERSION" \
+            --build-number="$GITHUB_RUN_NUMBER" \
+            --dart-define=AGENTPAD_VERSION="$AGENTPAD_VERSION"
           cp build/app/outputs/flutter-apk/app-release.apk ../agentpad.apk
 
       - name: Upload Android artifact
@@ -127,30 +270,39 @@ jobs:
           path: agentpad.apk
           if-no-files-found: error
 
-  # 5. 汇聚三端安装包并自动发布 GitHub Release
   create-release:
     name: Publish GitHub Release
-    needs: [bump-version, build-windows, build-macos, build-android]
+    needs:
+      - prepare-version
+      - build-windows
+      - build-macos
+      - build-android
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Download all built artifacts
         uses: actions/download-artifact@v4
         with:
           merge-multiple: true
 
-      - name: List downloaded artifacts
-        run: ls -lh agentpad-windows-x64.exe agentpad-macos-arm64.dmg agentpad.apk
+      - name: Verify release artifacts
+        shell: bash
+        run: |
+          test -s agentpad-windows-x64.exe
+          test -s agentpad-macos-arm64.dmg
+          test -s agentpad-macos-arm64.zip
+          test -s agentpad.apk
+          sha256sum agentpad-windows-x64.exe agentpad-macos-arm64.dmg agentpad-macos-arm64.zip agentpad.apk
 
-      - name: Create GitHub Release
+      - name: Create tag and GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.bump-version.outputs.new_tag }}
-          name: AgentPad ${{ needs.bump-version.outputs.new_tag }}
+          tag_name: ${{ needs.prepare-version.outputs.tag }}
+          name: AgentPad ${{ needs.prepare-version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
+          fail_on_unmatched_files: true
           files: |
             agentpad-windows-x64.exe
             agentpad-macos-arm64.dmg
+            agentpad-macos-arm64.zip
             agentpad.apk

@@ -40,11 +40,19 @@ fn main() -> eframe::Result {
         }
     }
 
+    let viewport = eframe::egui::ViewportBuilder::default()
+        .with_inner_size([440.0, 772.0])
+        .with_title("AgentPad")
+        .with_resizable(false);
+    #[cfg(target_os = "windows")]
+    let viewport = {
+        let app_icon =
+            eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon_white.png"))
+                .expect("valid app icon");
+        viewport.with_icon(app_icon)
+    };
     let native_options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([440.0, 772.0])
-            .with_title("AgentPad")
-            .with_resizable(false),
+        viewport,
         ..Default::default()
     };
     let result = eframe::run_native(

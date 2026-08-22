@@ -16,6 +16,11 @@ import 'store.dart';
 import 'touchpad.dart';
 import 'voice_input.dart';
 
+const appVersion = String.fromEnvironment(
+  'AGENTPAD_VERSION',
+  defaultValue: '0.1.0',
+);
+
 class AgentPadApp extends StatefulWidget {
   const AgentPadApp({super.key, this.store});
 
@@ -85,6 +90,8 @@ class _HomePageState extends State<HomePage> {
   Timer? trackPointTimer;
   Timer? padLongPressTimer;
   Timer? voiceTimer;
+  Timer? updateNoticeTimer;
+  OverlayEntry? updateNoticeEntry;
   Offset? trackPointVec;
   var leftDown = false;
   var rightDown = false;
@@ -122,6 +129,9 @@ class _HomePageState extends State<HomePage> {
     inputFocus.addListener(_onInputFocusChanged);
     hub!.sync();
     unawaited(_applyPointerHzDefault());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _applyAppIcon(store.appIcon);
+    });
   }
 
   Future<void> _applyPointerHzDefault() async {
@@ -149,6 +159,8 @@ class _HomePageState extends State<HomePage> {
     trackPointTimer?.cancel();
     padLongPressTimer?.cancel();
     voiceTimer?.cancel();
+    updateNoticeTimer?.cancel();
+    updateNoticeEntry?.remove();
     hub?.dispose();
     input.removeListener(_onInputChanged);
     inputFocus.removeListener(_onInputFocusChanged);
@@ -1659,6 +1671,30 @@ class _HomePageState extends State<HomePage> {
               ],
             ),
           ),
+          const SizedBox(height: 20),
+          const Align(
+            alignment: Alignment.centerLeft,
+            child: Text('桌面图标'),
+          ),
+          const SizedBox(height: 8),
+          SizedBox(
+            width: double.infinity,
+            child: SegmentedButton<String>(
+              showSelectedIcon: false,
+              segments: const [
+                ButtonSegment(value: 'system', label: Text('跟随系统')),
+                ButtonSegment(value: 'white', label: Text('默认浅色')),
+                ButtonSegment(value: 'black', label: Text('沉稳深色')),
+              ],
+              selected: {store.appIcon},
+              onSelectionChanged: (s) async {
+                store.appIcon = s.first;
+                await _persist();
+                _applyAppIcon(store.appIcon);
+                setSheet(() {});
+              },
+            ),
+          ),
           const SizedBox(height: 24),
           Row(
             children: [
@@ -1888,14 +1924,14 @@ class _HomePageState extends State<HomePage> {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text(
-                '版本 0.1.0',
+                '版本 $appVersion',
                 style: TextStyle(
                   color: _controlForeground(Theme.of(ctx).brightness).withValues(alpha: 0.6),
                   fontSize: 13,
                 ),
               ),
               TextButton.icon(
-                onPressed: () => _checkAndroidUpdate(ctx),
+                onPressed: _checkAndroidUpdate,
                 icon: const Icon(Icons.refresh, size: 16),
                 label: const Text('检查更新'),
               ),
@@ -1907,14 +1943,63 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Future<void> _checkAndroidUpdate(BuildContext ctx) async {
-    final messenger = ScaffoldMessenger.of(ctx);
-    messenger.showSnackBar(
-      const SnackBar(
-        content: Text('正在检查更新...'),
-        duration: Duration(seconds: 1),
+  void _applyAppIcon(String iconPref) {
+    var target = iconPref;
+    if (target == 'system') {
+      final isDark = Theme.of(context).brightness == Brightness.dark;
+      target = isDark ? 'black' : 'white';
+    }
+    const MethodChannel('agentpad/ws').invokeMethod<bool>('setAppIcon', {'icon': target});
+  }
+
+  void _showUpdateNotice(String message) {
+    updateNoticeTimer?.cancel();
+    updateNoticeEntry?.remove();
+
+    final brightness = Theme.of(context).brightness;
+    final bottom = MediaQuery.paddingOf(context).bottom + 24;
+    final overlay = Overlay.of(context, rootOverlay: true);
+    late final OverlayEntry entry;
+    entry = OverlayEntry(
+      builder: (_) => Positioned(
+        left: 16,
+        right: 16,
+        bottom: bottom,
+        child: IgnorePointer(
+          child: Center(
+            child: Material(
+              color: Colors.transparent,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                decoration: BoxDecoration(
+                  color: _controlBackground(brightness),
+                  border: Border.all(color: _controlBorder(brightness)),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  message,
+                  style: TextStyle(
+                    color: _controlForeground(brightness, selected: true),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
       ),
     );
+    overlay.insert(entry);
+    updateNoticeEntry = entry;
+    updateNoticeTimer = Timer(const Duration(seconds: 2), () {
+      if (identical(updateNoticeEntry, entry)) {
+        entry.remove();
+        updateNoticeEntry = null;
+      }
+    });
+  }
+
+  Future<void> _checkAndroidUpdate() async {
+    _showUpdateNotice('正在检查更新...');
 
     try {
       final client = HttpClient();
@@ -1927,9 +2012,9 @@ class _HomePageState extends State<HomePage> {
       final response = await request.close();
 
       if (response.statusCode != 200) {
-        messenger.showSnackBar(
-          SnackBar(content: Text('检查更新失败 (HTTP ${response.statusCode})')),
-        );
+        if (mounted) {
+          _showUpdateNotice('检查更新失败 (HTTP ${response.statusCode})');
+        }
         return;
       }
 
@@ -1950,11 +2035,11 @@ class _HomePageState extends State<HomePage> {
         }
       }
 
-      const currentVer = '0.1.0';
+      const currentVer = appVersion;
       if (_isNewerVersion(tagName, currentVer) && apkUrl != null) {
         if (!mounted) return;
         showDialog<void>(
-          context: ctx,
+          context: context,
           builder: (dCtx) => AlertDialog(
             title: Text('发现新版本 v$tagName'),
             content: SingleChildScrollView(
@@ -1975,15 +2060,13 @@ class _HomePageState extends State<HomePage> {
             ],
           ),
         );
-      } else {
-        messenger.showSnackBar(
-          const SnackBar(content: Text('当前已是最新版本 (v$currentVer)')),
-        );
+      } else if (mounted) {
+        _showUpdateNotice('当前已是最新版本 (v$currentVer)');
       }
     } catch (e) {
-      messenger.showSnackBar(
-        SnackBar(content: Text('检查更新出错: $e')),
-      );
+      if (mounted) {
+        _showUpdateNotice('检查更新出错: $e');
+      }
     }
   }
 

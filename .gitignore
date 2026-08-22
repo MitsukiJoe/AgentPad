@@ -25,17 +25,18 @@ protocol/
 **/*.psd
 **/*.ai
 **/*.fig
-**/*.icns
-**/*.ico
 **/*.iconset/
 **/icon_*.png
 **/icon_*.svg
+!desktop/crates/agentpad/assets/icon_*.png
 **/assets/icons/
-**/mipmap-*/ic_launcher*
 
 # Allow public repository assets (logos, banners, screenshots)
 !assets/
 !assets/**
+/assets/logo-mo-*.png
+/assets/logo-pc-*.png
+/assets/logo-pc-*.jpg
 
 # Rust
 desktop/target/
@@ -67,8 +68,18 @@ android/build/
 .env.*
 *.jks
 *.keystore
+*.p12
+*.pfx
+*.p8
 *.key
 *.pem
+**/key.properties
+**/secrets.properties
+*.mobileprovision
+**/google-services.json
+**/GoogleService-Info.plist
+**/credentials.json
+**/service-account*.json
 .venv/
 venv/
 __pycache__/

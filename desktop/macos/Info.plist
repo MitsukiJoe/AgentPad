@@ -8,6 +8,8 @@
   <string>AgentPad</string>
   <key>CFBundleExecutable</key>
   <string>agentpad</string>
+  <key>CFBundleIconFile</key>
+  <string>AgentPad.icns</string>
   <key>CFBundleIdentifier</key>
   <string>app.agentpad</string>
   <key>CFBundleInfoDictionaryVersion</key>

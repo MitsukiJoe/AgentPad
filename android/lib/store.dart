@@ -146,6 +146,7 @@ class PadStore {
   String clientId = '';
   String theme = 'system';
   String themeColor = 'blue';
+  String appIcon = 'system';
 
   Duration get voiceDelay => Duration(milliseconds: voiceDelayMs);
 
@@ -227,6 +228,10 @@ class PadStore {
       landscapePointerSide = 'left';
     }
     theme = p.getString('theme') ?? 'system';
+    appIcon = p.getString('app_icon') ?? 'system';
+    if (!{'white', 'black', 'system'}.contains(appIcon)) {
+      appIcon = 'system';
+    }
     themeColor = p.getString('theme_color') ?? 'blue';
     if (!{
       'blue',
@@ -274,6 +279,7 @@ class PadStore {
     await p.setString('landscape_pointer_side', landscapePointerSide);
     await p.setString('theme', theme);
     await p.setString('theme_color', themeColor);
+    await p.setString('app_icon', appIcon);
     await p.setString(
       'devices',
       jsonEncode([for (final d in devices) d.toJson()]),
