@@ -19,6 +19,8 @@ protocol/
 .brv/
 .workflows/
 .tmp/
+.dsh-*/
+.dsh/
 
 # Design source files & raw app icons — never publish
 **/*.sketch
