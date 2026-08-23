@@ -243,40 +243,31 @@ class WifiWs(
                             val defaultComponent = android.content.ComponentName(pkg, "$pkg.MainActivity")
                             val blackComponent = android.content.ComponentName(pkg, "$pkg.MainActivityBlack")
 
-                            val blackEnabled = pm.getComponentEnabledSetting(blackComponent) ==
-                                android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED
-                            val defaultEnabled = pm.getComponentEnabledSetting(defaultComponent) ==
-                                android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+                            // 刚安装时组件为 DEFAULT 态（非显式 ENABLED/DISABLED），
+                            // 若按查询结果跳过写入，会漏禁用另一入口导致桌面出现双图标；
+                            // 这里无条件把两个组件写成目标状态，幂等且可自愈历史脏数据。
                             if (icon == "black") {
-                                if (!blackEnabled) {
-                                    pm.setComponentEnabledSetting(
-                                        blackComponent,
-                                        android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
-                                        android.content.pm.PackageManager.DONT_KILL_APP
-                                    )
-                                }
-                                if (defaultEnabled) {
-                                    pm.setComponentEnabledSetting(
-                                        defaultComponent,
-                                        android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
-                                        android.content.pm.PackageManager.DONT_KILL_APP
-                                    )
-                                }
+                                pm.setComponentEnabledSetting(
+                                    blackComponent,
+                                    android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                                    android.content.pm.PackageManager.DONT_KILL_APP
+                                )
+                                pm.setComponentEnabledSetting(
+                                    defaultComponent,
+                                    android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                                    android.content.pm.PackageManager.DONT_KILL_APP
+                                )
                             } else {
-                                if (!defaultEnabled) {
-                                    pm.setComponentEnabledSetting(
-                                        defaultComponent,
-                                        android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
-                                        android.content.pm.PackageManager.DONT_KILL_APP
-                                    )
-                                }
-                                if (blackEnabled) {
-                                    pm.setComponentEnabledSetting(
-                                        blackComponent,
-                                        android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
-                                        android.content.pm.PackageManager.DONT_KILL_APP
-                                    )
-                                }
+                                pm.setComponentEnabledSetting(
+                                    defaultComponent,
+                                    android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                                    android.content.pm.PackageManager.DONT_KILL_APP
+                                )
+                                pm.setComponentEnabledSetting(
+                                    blackComponent,
+                                    android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                                    android.content.pm.PackageManager.DONT_KILL_APP
+                                )
                             }
                             result.success(true)
                         } catch (e: Exception) {

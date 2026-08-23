@@ -76,6 +76,7 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   static const _pageGutter = 12.0;
+  static const _updateCheckInterval = Duration(hours: 24);
 
   late final PadStore store;
   Hub? hub;
@@ -91,7 +92,12 @@ class _HomePageState extends State<HomePage> {
   Timer? padLongPressTimer;
   Timer? voiceTimer;
   Timer? updateNoticeTimer;
+  Timer? updateCheckTimer;
   OverlayEntry? updateNoticeEntry;
+  var checkingUpdate = false;
+  String? pendingUpdateTag;
+  String? pendingUpdateBody;
+  String? pendingUpdateApkUrl;
   Offset? trackPointVec;
   var leftDown = false;
   var rightDown = false;
@@ -130,7 +136,12 @@ class _HomePageState extends State<HomePage> {
     hub!.sync();
     unawaited(_applyPointerHzDefault());
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _applyAppIcon(store.appIcon);
+      if (!mounted) return;
+      _applyAppIcon(store.appIcon);
+      unawaited(_checkAndroidUpdate(notify: false));
+    });
+    updateCheckTimer = Timer.periodic(_updateCheckInterval, (_) {
+      if (mounted) unawaited(_checkAndroidUpdate(notify: false));
     });
   }
 
@@ -160,6 +171,7 @@ class _HomePageState extends State<HomePage> {
     padLongPressTimer?.cancel();
     voiceTimer?.cancel();
     updateNoticeTimer?.cancel();
+    updateCheckTimer?.cancel();
     updateNoticeEntry?.remove();
     hub?.dispose();
     input.removeListener(_onInputChanged);
@@ -367,6 +379,7 @@ class _HomePageState extends State<HomePage> {
           if (store.homePointerQuickSwitch) _pointerModeSelector(),
           _pointerArea(),
           _shortcutSection(),
+          _updateFooter(),
         ],
       ),
     ),
@@ -411,6 +424,7 @@ class _HomePageState extends State<HomePage> {
         _actionButtons(),
         _textInput(),
         const Spacer(),
+        _updateFooter(),
       ],
     ),
   );
@@ -1998,11 +2012,17 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-  Future<void> _checkAndroidUpdate() async {
-    _showUpdateNotice('正在检查更新...');
+  Future<void> _checkAndroidUpdate({bool notify = true}) async {
+    if (checkingUpdate) {
+      if (notify) _showUpdateNotice('正在检查更新...');
+      return;
+    }
+    checkingUpdate = true;
+    if (notify) _showUpdateNotice('正在检查更新...');
 
+    HttpClient? client;
     try {
-      final client = HttpClient();
+      client = HttpClient();
       client.connectionTimeout = const Duration(seconds: 8);
       final request = await client.getUrl(
         Uri.parse('https://api.github.com/repos/MitsukiJoe/AgentPad/releases/latest'),
@@ -2012,7 +2032,7 @@ class _HomePageState extends State<HomePage> {
       final response = await request.close();
 
       if (response.statusCode != 200) {
-        if (mounted) {
+        if (mounted && notify) {
           _showUpdateNotice('检查更新失败 (HTTP ${response.statusCode})');
         }
         return;
@@ -2038,36 +2058,92 @@ class _HomePageState extends State<HomePage> {
       const currentVer = appVersion;
       if (_isNewerVersion(tagName, currentVer) && apkUrl != null) {
         if (!mounted) return;
-        showDialog<void>(
-          context: context,
-          builder: (dCtx) => AlertDialog(
-            title: Text('发现新版本 v$tagName'),
-            content: SingleChildScrollView(
-              child: Text(body.isNotEmpty ? body : '点击下方按钮下载最新安装包覆盖更新。'),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(dCtx),
-                child: const Text('取消'),
-              ),
-              FilledButton(
-                onPressed: () {
-                  Navigator.pop(dCtx);
-                  const MethodChannel('agentpad/ws').invokeMethod<bool>('openUrl', {'url': apkUrl});
-                },
-                child: const Text('下载并更新'),
-              ),
-            ],
-          ),
-        );
-      } else if (mounted) {
+        setState(() {
+          pendingUpdateTag = tagName;
+          pendingUpdateBody = body;
+          pendingUpdateApkUrl = apkUrl;
+        });
+        if (notify) _showUpdateNotice('发现新版本 v$tagName');
+      } else if (mounted && notify) {
         _showUpdateNotice('当前已是最新版本 (v$currentVer)');
       }
     } catch (e) {
-      if (mounted) {
+      if (mounted && notify) {
         _showUpdateNotice('检查更新出错: $e');
       }
+    } finally {
+      client?.close(force: true);
+      checkingUpdate = false;
     }
+  }
+
+  void _showUpdateDialog() {
+    final tag = pendingUpdateTag;
+    final url = pendingUpdateApkUrl;
+    if (tag == null || url == null) return;
+    final body = pendingUpdateBody ?? '';
+    showDialog<void>(
+      context: context,
+      builder: (dCtx) => AlertDialog(
+        title: Text('发现新版本 v$tag'),
+        content: SingleChildScrollView(
+          child: Text(body.isNotEmpty ? body : '点击下方按钮下载最新安装包覆盖更新。'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dCtx),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.pop(dCtx);
+              const MethodChannel('agentpad/ws').invokeMethod<bool>('openUrl', {'url': url});
+            },
+            child: const Text('下载并更新'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _updateFooter() {
+    final brightness = Theme.of(context).brightness;
+    const updateGreen = Color(0xFF74B580);
+    return Padding(
+      key: const ValueKey('update-footer'),
+      padding: const EdgeInsets.fromLTRB(_pageGutter, 0, _pageGutter, 8),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Text(
+            '版本 $appVersion',
+            style: TextStyle(
+              color: _controlForeground(brightness).withValues(alpha: 0.6),
+              fontSize: 12,
+            ),
+          ),
+          if (pendingUpdateTag != null) ...[
+            const SizedBox(width: 6),
+            Container(
+              width: 6,
+              height: 6,
+              decoration: const BoxDecoration(
+                color: updateGreen,
+                shape: BoxShape.circle,
+              ),
+            ),
+            const SizedBox(width: 4),
+            GestureDetector(
+              onTap: _showUpdateDialog,
+              child: const Text(
+                '可更新',
+                style: TextStyle(color: updateGreen, fontSize: 12),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
   }
 
   bool _isNewerVersion(String remote, String current) {
