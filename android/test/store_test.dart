@@ -26,13 +26,52 @@ void main() {
   });
 
   test('same ip different device_id stays separate', () {
-    final list = upsertDevice(
-      [Device(deviceId: 'a', name: 'A', ips: ['10.0.0.5'], port: 9618)],
-      Device(deviceId: 'b', name: 'B', ips: ['10.0.0.5'], port: 9618),
-    );
+    final list = upsertDevice([
+      Device(deviceId: 'a', name: 'A', ips: ['10.0.0.5'], port: 9618),
+    ], Device(deviceId: 'b', name: 'B', ips: ['10.0.0.5'], port: 9618));
     expect(list.length, 2);
     expect(list[0].name, 'A');
     expect(list[1].name, 'B');
+  });
+
+  test('hub keeps different device ids separate when ips overlap', () {
+    final hub = Hub(PadStore());
+    final online = Device(
+      deviceId: 'a',
+      name: 'A',
+      ips: ['10.0.0.5'],
+      port: 9618,
+    );
+    hub.links['a'] = PcLink(hub, online, 'a');
+    hub.online.add('a');
+
+    final other = Device(
+      deviceId: 'b',
+      name: 'B',
+      ips: ['10.0.0.5'],
+      port: 9618,
+    );
+    expect(hub.isOnline(other), isFalse);
+  });
+
+  test('hub falls back to overlapping ip for a legacy device without id', () {
+    final hub = Hub(PadStore());
+    final online = Device(
+      deviceId: 'a',
+      name: 'A',
+      ips: ['10.0.0.5'],
+      port: 9618,
+    );
+    hub.links['a'] = PcLink(hub, online, 'a');
+    hub.online.add('a');
+
+    final legacy = Device(
+      deviceId: '',
+      name: 'legacy',
+      ips: ['10.0.0.5'],
+      port: 9618,
+    );
+    expect(hub.isOnline(legacy), isTrue);
   });
 
   test('upsert merges by overlapping ip when no device_id', () {

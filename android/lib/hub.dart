@@ -52,7 +52,9 @@ class Hub {
 
   static bool _samePc(Device a, Device b) {
     if (identical(a, b)) return true;
-    if (a.deviceId.isNotEmpty && a.deviceId == b.deviceId) return true;
+    if (a.deviceId.isNotEmpty && b.deviceId.isNotEmpty) {
+      return a.deviceId == b.deviceId;
+    }
     return a.ips.toSet().intersection(b.ips.toSet()).isNotEmpty;
   }
 
