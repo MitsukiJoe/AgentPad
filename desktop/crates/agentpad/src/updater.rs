@@ -1,9 +1,11 @@
-use std::io::Read;
+use std::io::{Read, Write};
+use std::path::Path;
+#[cfg(target_os = "macos")]
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 pub const CURRENT_VERSION: &str = match option_env!("AGENTPAD_VERSION") {
     Some(version) => version,
@@ -26,6 +28,7 @@ pub enum UpdateStatus {
     UpToDate,
     Available(UpdateInfo),
     Updating(String),
+    UpdateFailed { info: Box<UpdateInfo>, message: String },
     Failed(String),
 }
 
@@ -72,9 +75,12 @@ impl Updater {
         let info = info.clone();
         std::thread::spawn(move || {
             *status_arc.lock().unwrap() = UpdateStatus::Updating("正在下载更新...".into());
-            if let Err(e) = perform_update(&info) {
+            if let Err(e) = perform_update(&info, &status_arc) {
                 crate::logutil::write(&format!("update failed: {e}"));
-                *status_arc.lock().unwrap() = UpdateStatus::Failed(e);
+                *status_arc.lock().unwrap() = UpdateStatus::UpdateFailed {
+                    info: Box::new(info),
+                    message: e,
+                };
             }
         });
     }
@@ -82,12 +88,7 @@ impl Updater {
 
 fn fetch_latest_release() -> Result<Option<UpdateInfo>, String> {
     let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
-    let tls = ureq::native_tls::TlsConnector::new()
-        .map_err(|e| format!("初始化系统 TLS 失败: {e}"))?;
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(10))
-        .tls_connector(Arc::new(tls))
-        .build();
+    let agent = https_agent()?;
     let response = agent
         .get(&url)
         .set("User-Agent", "AgentPad-Desktop")
@@ -116,23 +117,22 @@ fn fetch_latest_release() -> Result<Option<UpdateInfo>, String> {
     let body = v.get("body").and_then(|b| b.as_str()).unwrap_or("").to_string();
     let assets = v.get("assets").and_then(|a| a.as_array()).ok_or_else(|| "未找到发布文件".to_string())?;
 
-    #[cfg(target_os = "windows")]
-    let expected_asset = "agentpad-windows-x64.exe";
-    #[cfg(target_os = "macos")]
-    let expected_asset = "agentpad-macos-arm64.zip";
+    let expected_asset = if cfg!(target_os = "windows") {
+        "agentpad-windows-x64.exe"
+    } else {
+        "agentpad-macos-arm64.zip"
+    };
 
-    let download_url = assets.iter().find_map(|asset| {
-        let name = asset.get("name")?.as_str()?;
-        #[cfg(target_os = "macos")]
-        if name == "agentpad-macos-arm64.zip" || name == "agentpad-macos-arm64.dmg" {
-            return asset.get("browser_download_url")?.as_str().map(|s| s.to_string());
-        }
-        #[cfg(target_os = "windows")]
-        if name == expected_asset || name.ends_with(".exe") {
-            return asset.get("browser_download_url")?.as_str().map(|s| s.to_string());
-        }
-        None
-    }).ok_or_else(|| format!("未找到适用的安装包 ({expected_asset})"))?;
+    let download_url = assets
+        .iter()
+        .filter_map(|a| a.get("name").and_then(|n| n.as_str()).map(|n| (n, a)))
+        .find(|(name, _)| *name == expected_asset)
+        .and_then(|(_, a)| {
+            a.get("browser_download_url")
+                .and_then(|u| u.as_str())
+                .map(str::to_string)
+        })
+        .ok_or_else(|| format!("未找到适用的安装包 ({expected_asset})"))?;
 
     Ok(Some(UpdateInfo {
         tag_name,
@@ -153,134 +153,181 @@ fn is_newer_version(remote: &str, current: &str) -> bool {
     r > c
 }
 
+fn https_agent() -> Result<ureq::Agent, String> {
+    let tls = ureq::native_tls::TlsConnector::new()
+        .map_err(|e| format!("初始化系统 TLS 失败: {e}"))?;
+    Ok(ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(15))
+        .timeout(Duration::from_secs(600))
+        .tls_connector(Arc::new(tls))
+        .build())
+}
+
+fn download_progress_msg(done: u64, total: u64) -> String {
+    if total > 0 {
+        format!("正在下载更新... {}%", done * 100 / total.max(1))
+    } else {
+        format!("正在下载更新... {:.1} MB", done as f64 / 1048576.0)
+    }
+}
+
+fn download_with_progress(url: &str, dest: &Path, on_progress: &dyn Fn(u64, u64)) -> Result<(), String> {
+    let agent = https_agent()?;
+    let response = agent
+        .get(url)
+        .set("User-Agent", "AgentPad-Desktop")
+        .call()
+        .map_err(|e| format!("下载失败: {e}"))?;
+    let total = response
+        .header("Content-Length")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    let mut reader = response.into_reader();
+    let mut file = std::fs::File::create(dest)
+        .map_err(|e| format!("创建更新文件失败（目录可能无写入权限）: {e}"))?;
+    let mut buf = [0u8; 65536];
+    let mut done: u64 = 0;
+    loop {
+        let n = reader.read(&mut buf).map_err(|e| format!("下载中断: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        file.write_all(&buf[..n])
+            .map_err(|e| format!("写入更新文件失败: {e}"))?;
+        done += n as u64;
+        on_progress(done, total);
+    }
+    if total > 0 && done != total {
+        return Err(format!("下载不完整（{done}/{total} 字节）"));
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "windows")]
-fn perform_update(info: &UpdateInfo) -> Result<(), String> {
+fn perform_update(info: &UpdateInfo, status: &Arc<Mutex<UpdateStatus>>) -> Result<(), String> {
     let exe_path = std::env::current_exe().map_err(|e| format!("获取当前路径失败: {e}"))?;
     let exe_dir = exe_path.parent().ok_or_else(|| "无法获取程序目录".to_string())?;
-    let updater_script = exe_dir.join("agentpad_updater.bat");
-    let pid = std::process::id();
 
-    // 生成 Windows 专属更新脚本
-    let script_content = format!(
-        r#"@echo off
-setlocal enabledelayedexpansion
-title AgentPad Auto Updater
-echo [AgentPad] 正在等待旧版本退出 (PID: {pid})...
+    let tmp_file = exe_dir.join("agentpad_update.new");
+    let report = |done: u64, total: u64| {
+        *status.lock().unwrap() = UpdateStatus::Updating(download_progress_msg(done, total));
+    };
+    download_with_progress(&info.download_url, &tmp_file, &report)?;
 
-:wait_loop
-tasklist /fi "PID eq {pid}" | findstr /i "{pid}" >nul
-if not errorlevel 1 (
-    timeout /t 1 /nobreak >nul
-    goto wait_loop
-)
+    *status.lock().unwrap() = UpdateStatus::Updating("正在替换程序文件...".into());
+    let old_path = exe_dir.join(format!(
+        "{}.old",
+        exe_path
+            .file_name()
+            .map(|f| f.to_string_lossy())
+            .unwrap_or_default()
+    ));
+    let _ = std::fs::remove_file(&old_path);
 
-echo [AgentPad] 正在下载最新版本 ({ver})...
-set TARGET=%~dp0{exe_name}
-if not exist "%TARGET%" set TARGET=%~dp0agentpad.exe
-set TEMP_FILE=%~dp0agentpad_update.tmp
+    // 运行中的 EXE 可以改名但不能删除：先让位，再落位新文件
+    std::fs::rename(&exe_path, &old_path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_file);
+        format!("无法移动旧程序文件（可能被安全软件占用或目录无写入权限）: {e}")
+    })?;
+    if let Err(e) = std::fs::rename(&tmp_file, &exe_path) {
+        let _ = std::fs::rename(&old_path, &exe_path);
+        return Err(format!("替换程序文件失败，已恢复旧版本: {e}"));
+    }
 
-curl -L -f --max-time 120 -o "%TEMP_FILE%" "{url}"
-if not exist "%TEMP_FILE%" (
-    echo [错误] 下载失败，请检查网络后重试。
-    pause
-    exit /b 1
-)
-
-echo [AgentPad] 正在替换程序文件...
-move /y "%TEMP_FILE%" "%TARGET%" >nul
-if errorlevel 1 (
-    echo [错误] 替换文件失败，请以管理员身份重试。
-    del "%TEMP_FILE%" >nul 2>&1
-    pause
-    exit /b 1
-)
-
-echo [AgentPad] 更新完成，正在启动新版本...
-start "" "%TARGET%"
-del "%~f0" >nul 2>&1
-exit /b 0
-"#,
-        pid = pid,
-        ver = info.version,
-        exe_name = exe_path.file_name().and_then(|f| f.to_str()).unwrap_or("agentpad-windows-x64.exe"),
-        url = info.download_url
-    );
-
-    std::fs::write(&updater_script, script_content)
-        .map_err(|e| format!("写入更新脚本失败: {e}"))?;
-
-    // 启动外部脚本接管更新
-    Command::new("cmd")
-        .args(["/C", "start", "", updater_script.to_str().unwrap_or("agentpad_updater.bat")])
+    *status.lock().unwrap() = UpdateStatus::Updating("正在启动新版本...".into());
+    Command::new(&exe_path)
         .spawn()
-        .map_err(|e| format!("启动更新脚本失败: {e}"))?;
-
-    // 退出当前进程
+        .map_err(|e| format!("启动新版本失败: {e}"))?;
     std::process::exit(0);
 }
 
 #[cfg(target_os = "macos")]
-fn perform_update(info: &UpdateInfo) -> Result<(), String> {
-    let tmp_dir = PathBuf::from("/tmp/agentpad_update");
-    let _ = std::fs::remove_dir_all(&tmp_dir);
-    let _ = std::fs::create_dir_all(&tmp_dir);
-
-    let is_zip = info.download_url.ends_with(".zip");
-    if is_zip {
-        let zip_path = tmp_dir.join("agentpad.zip");
-        let curl_res = Command::new("curl")
-            .args(["-L", "-f", "--max-time", "120", "-o", zip_path.to_str().unwrap(), &info.download_url])
-            .status()
-            .map_err(|e| format!("下载更新包失败: {e}"))?;
-
-        if !curl_res.success() {
-            return Err("下载更新包失败".into());
+fn find_app_bundle(exe: &Path) -> Option<PathBuf> {
+    let mut dir = exe.parent()?;
+    loop {
+        if dir.extension().and_then(|e| e.to_str()) == Some("app") {
+            return Some(dir.to_path_buf());
         }
-
-        let unzip_res = Command::new("unzip")
-            .args(["-q", zip_path.to_str().unwrap(), "-d", tmp_dir.to_str().unwrap()])
-            .status()
-            .map_err(|e| format!("解压更新包失败: {e}"))?;
-
-        if !unzip_res.success() {
-            return Err("解压更新包失败".into());
-        }
-
-        let new_app = tmp_dir.join("AgentPad.app");
-        let current_exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let is_in_apps = current_exe.to_string_lossy().starts_with("/Applications/AgentPad.app");
-
-        if is_in_apps && new_app.exists() {
-            let _ = Command::new("ditto")
-                .args([new_app.to_str().unwrap(), "/Applications/AgentPad.app"])
-                .status();
-            let _ = Command::new("open")
-                .args(["-n", "/Applications/AgentPad.app"])
-                .spawn();
-            std::process::exit(0);
-        } else {
-            // 打开解压目录让用户使用
-            let _ = Command::new("open").args([tmp_dir.to_str().unwrap()]).spawn();
-            std::process::exit(0);
-        }
-    } else {
-        // 如果是 DMG
-        let dmg_path = tmp_dir.join("agentpad.dmg");
-        let curl_res = Command::new("curl")
-            .args(["-L", "-f", "--max-time", "120", "-o", dmg_path.to_str().unwrap(), &info.download_url])
-            .status()
-            .map_err(|e| format!("下载 DMG 失败: {e}"))?;
-
-        if !curl_res.success() {
-            return Err("下载 DMG 失败".into());
-        }
-
-        let _ = Command::new("open").args([dmg_path.to_str().unwrap()]).spawn();
-        std::process::exit(0);
+        dir = dir.parent()?;
     }
 }
 
-/// 启动时自检：清理上次遗留的专属更新脚本（防止误删无关文件）
+#[cfg(target_os = "macos")]
+fn perform_update(info: &UpdateInfo, status: &Arc<Mutex<UpdateStatus>>) -> Result<(), String> {
+    let tmp_dir = PathBuf::from("/tmp/agentpad_update");
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("创建临时目录失败: {e}"))?;
+
+    let report = |done: u64, total: u64| {
+        *status.lock().unwrap() = UpdateStatus::Updating(download_progress_msg(done, total));
+    };
+    let zip_path = tmp_dir.join("agentpad.zip");
+    download_with_progress(&info.download_url, &zip_path, &report)?;
+
+    *status.lock().unwrap() = UpdateStatus::Updating("正在解压更新...".into());
+    let unzip_ok = Command::new("unzip")
+        .args(["-q", "-o"])
+        .arg(&zip_path)
+        .arg("-d")
+        .arg(&tmp_dir)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !unzip_ok {
+        return Err("解压更新包失败".into());
+    }
+    let new_app = tmp_dir.join("AgentPad.app");
+    if !new_app.exists() {
+        return Err("更新包内未找到 AgentPad.app".into());
+    }
+
+    let current_exe = std::env::current_exe().map_err(|e| format!("获取当前路径失败: {e}"))?;
+    let Some(bundle) = find_app_bundle(&current_exe) else {
+        // 非 .app 运行（如 cargo 开发构建）：打开解压目录手动处理
+        let _ = Command::new("open").arg(&tmp_dir).spawn();
+        std::process::exit(0);
+    };
+
+    *status.lock().unwrap() = UpdateStatus::Updating("正在替换应用...".into());
+    let parent = bundle
+        .parent()
+        .ok_or_else(|| "无法获取应用所在目录".to_string())?;
+    let old_bundle = parent.join(format!(
+        "{}.old",
+        bundle
+            .file_name()
+            .map(|f| f.to_string_lossy())
+            .unwrap_or_default()
+    ));
+    let _ = std::fs::remove_dir_all(&old_bundle);
+
+    if std::fs::rename(&bundle, &old_bundle).is_ok() {
+        if let Err(e) = std::fs::rename(&new_app, &bundle) {
+            let _ = std::fs::rename(&old_bundle, &bundle);
+            return Err(format!("替换应用失败，已保留原位置: {e}"));
+        }
+    } else {
+        // rename 失败（跨卷/权限）：原地覆盖，运行中进程继续使用旧 inode
+        let ditto_ok = Command::new("ditto")
+            .args([&new_app, &bundle])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ditto_ok {
+            return Err("替换应用失败：应用所在目录不可写".into());
+        }
+    }
+
+    *status.lock().unwrap() = UpdateStatus::Updating("正在启动新版本...".into());
+    Command::new("open")
+        .arg("-n")
+        .arg(&bundle)
+        .spawn()
+        .map_err(|e| format!("启动新版本失败: {e}"))?;
+    std::process::exit(0);
+}
+
+/// 启动时自检：清理历史版本遗留的更新产物（旧脚本式更新残留、换名替换留下的 .old）
 pub fn cleanup_stale_updater_script() {
     #[cfg(target_os = "windows")]
     if let Ok(exe_path) = std::env::current_exe() {
@@ -293,7 +340,25 @@ pub fn cleanup_stale_updater_script() {
                     }
                 }
             }
+            let _ = std::fs::remove_file(exe_dir.join("agentpad_update.tmp"));
+            let _ = std::fs::remove_file(exe_dir.join("agentpad_update.new"));
+            if let Some(name) = exe_path.file_name() {
+                let _ = std::fs::remove_file(exe_dir.join(format!("{}.old", name.to_string_lossy())));
+            }
         }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(bundle) = find_app_bundle(&exe_path) {
+                if let (Some(parent), Some(name)) = (bundle.parent(), bundle.file_name()) {
+                    let _ = std::fs::remove_dir_all(
+                        parent.join(format!("{}.old", name.to_string_lossy())),
+                    );
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all("/tmp/agentpad_update");
     }
 }
 
@@ -312,5 +377,11 @@ mod tests {
         assert!(is_newer_version("0.1.1", "0.1.0"));
         assert!(!is_newer_version("0.1.0", "0.1.0"));
         assert!(!is_newer_version("0.0.9", "0.1.0"));
+    }
+
+    #[test]
+    fn progress_message_formats() {
+        assert_eq!(download_progress_msg(50, 200), "正在下载更新... 25%");
+        assert!(download_progress_msg(1, 0).starts_with("正在下载更新..."));
     }
 }

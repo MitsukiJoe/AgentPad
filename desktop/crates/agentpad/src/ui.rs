@@ -17,6 +17,7 @@ const CONTENT_W: f32 = 344.0;
 const QR_FRAME: f32 = 284.0;
 const QR_INSET: f32 = 12.0;
 const CONTROL_H: f32 = 40.0;
+const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub struct PairingApp {
     state: Arc<AppState>,
@@ -41,6 +42,7 @@ pub struct PairingApp {
     permission_expanded: bool,
     autostart_enabled: bool,
     updater: Arc<crate::updater::Updater>,
+    last_update_check: Instant,
 }
 
 impl PairingApp {
@@ -80,6 +82,7 @@ impl PairingApp {
             }
         };
         let updater = Arc::new(crate::updater::Updater::new());
+        updater.check_for_updates();
 
         Self {
             state,
@@ -104,6 +107,7 @@ impl PairingApp {
             permission_expanded: false,
             autostart_enabled: crate::autostart::enabled(),
             updater,
+            last_update_check: Instant::now(),
         }
     }
 
@@ -238,6 +242,10 @@ impl PairingApp {
         self.apply_window_cmds(ctx);
         if self.last_nic_scan.elapsed() > Duration::from_secs(2) {
             self.refresh_nics();
+        }
+        if self.last_update_check.elapsed() >= UPDATE_CHECK_INTERVAL {
+            self.updater.check_for_updates();
+            self.last_update_check = Instant::now();
         }
         ctx.set_theme(self.theme);
         apply_app_style(ctx);
@@ -390,6 +398,33 @@ impl eframe::App for PairingApp {
                                                     .size(12.0)
                                                     .color(accent),
                                             );
+                                        }
+                                        crate::updater::UpdateStatus::UpdateFailed { info, message } => {
+                                            ui.add_space(4.0);
+                                            let short: String = if message.chars().count() > 60 {
+                                                format!("{}...", message.chars().take(60).collect::<String>())
+                                            } else {
+                                                message.clone()
+                                            };
+                                            ui.label(
+                                                egui::RichText::new(short)
+                                                    .size(12.0)
+                                                    .color(muted),
+                                            )
+                                            .on_hover_text(&message);
+                                            if ui
+                                                .add(
+                                                    egui::Button::new(
+                                                        egui::RichText::new("重试更新")
+                                                            .size(12.0)
+                                                            .color(muted),
+                                                    )
+                                                    .frame(false),
+                                                )
+                                                .clicked()
+                                            {
+                                                self.updater.start_update(&info);
+                                            }
                                         }
                                         status @ (crate::updater::UpdateStatus::Idle
                                         | crate::updater::UpdateStatus::UpToDate
@@ -892,6 +927,11 @@ mod tests {
             copy_label(Some(now - Duration::from_secs(3)), now),
             "复制地址",
         );
+    }
+
+    #[test]
+    fn update_check_interval_is_24_hours() {
+        assert_eq!(UPDATE_CHECK_INTERVAL, Duration::from_secs(24 * 60 * 60));
     }
 
     #[test]
