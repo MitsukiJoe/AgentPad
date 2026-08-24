@@ -40,6 +40,10 @@ protocol/
 /assets/logo-pc-*.png
 /assets/logo-pc-*.jpg
 
+# Social preview source templates & docs — keep only rendered PNGs
+assets/social-preview/*
+!assets/social-preview/*.png
+
 # Rust
 desktop/target/
 **/target/

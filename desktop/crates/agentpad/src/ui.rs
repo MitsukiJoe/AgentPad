@@ -8,7 +8,7 @@ use eframe::egui::{
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
-use crate::net::{self, Nic};
+use crate::net::{self, Nic, NicKind};
 use crate::protocol::{QrPayload, PORT};
 use crate::qr;
 use crate::ws::AppState;
@@ -819,12 +819,11 @@ fn theme_to_str(p: ThemePreference) -> &'static str {
 fn current_nic_label(nics: &[Nic], ip: &str) -> String {
     nics.iter()
         .find(|n| n.ip == ip)
-        .map(|n| {
-            if n.wifi {
-                format!("Wi-Fi  {}", n.ip)
-            } else {
-                format!("{}  {}", n.name, n.ip)
-            }
+        .map(|n| match n.kind {
+            NicKind::Wifi => format!("Wi-Fi  {}", n.ip),
+            NicKind::Tunnel => format!("隧道  {}", n.ip),
+            NicKind::Virtual => format!("虚拟/共享 · {}  {}", n.name, n.ip),
+            NicKind::Ethernet | NicKind::Other => format!("{}  {}", n.name, n.ip),
         })
         .unwrap_or_else(|| {
             if ip.is_empty() {
