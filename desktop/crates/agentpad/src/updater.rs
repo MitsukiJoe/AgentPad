@@ -5,7 +5,10 @@ use std::process::Command;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 pub const CURRENT_VERSION: &str = match option_env!("AGENTPAD_VERSION") {
     Some(version) => version,
@@ -22,6 +25,33 @@ pub struct UpdateInfo {
     pub version: String,
     pub body: String,
     pub download_url: String,
+    pub sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateManifest {
+    schema: u32,
+    tag_name: String,
+    version: String,
+    release_url: String,
+    #[serde(default)]
+    body: String,
+    assets: ManifestAssets,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManifestAssets {
+    #[cfg(target_os = "windows")]
+    windows: ManifestAsset,
+    #[cfg(target_os = "macos")]
+    macos: ManifestAsset,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ManifestAsset {
+    name: String,
+    url: String,
+    sha256: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -89,60 +119,108 @@ impl Updater {
     }
 }
 
-fn fetch_latest_release() -> Result<Option<UpdateInfo>, String> {
-    let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
-    let agent = https_agent()?;
+fn manifest_urls() -> [String; 3] {
+    let cache_hour = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        / 3600;
+    let path = format!("gh/{GITHUB_REPO}@update-manifest/agentpad-update.json");
+    [
+        format!(
+            "https://github.com/{GITHUB_REPO}/releases/latest/download/agentpad-update.json"
+        ),
+        format!("https://cdn.jsdelivr.net/{path}?hour={cache_hour}"),
+        format!("https://cdn.jsdmirror.com/{path}?hour={cache_hour}"),
+    ]
+}
+
+fn fetch_manifest(agent: &ureq::Agent, url: &str) -> Result<UpdateManifest, String> {
     let response = agent
-        .get(&url)
+        .get(url)
         .set("User-Agent", "AgentPad-Desktop")
-        .set("Accept", "application/vnd.github.v3+json")
         .call()
-        .map_err(|e| format!("网络请求失败: {e}"))?;
+        .map_err(|e| format!("{url}: {e}"))?;
     let mut json_text = String::new();
     response
         .into_reader()
-        .take(2 * 1024 * 1024)
+        .take(512 * 1024)
         .read_to_string(&mut json_text)
-        .map_err(|e| format!("读取 GitHub 响应失败: {e}"))?;
-    let v: serde_json::Value = serde_json::from_str(&json_text)
-        .map_err(|e| format!("解析 GitHub 响应失败: {e}"))?;
+        .map_err(|e| format!("读取更新清单失败 ({url}): {e}"))?;
+    serde_json::from_str(&json_text).map_err(|e| format!("解析更新清单失败 ({url}): {e}"))
+}
 
-    let tag_name = v.get("tag_name")
-        .and_then(|t| t.as_str())
-        .ok_or_else(|| "未找到版本标签".to_string())?
-        .to_string();
+fn expected_asset_url(tag_name: &str, asset_name: &str) -> String {
+    format!(
+        "https://github.com/{GITHUB_REPO}/releases/download/{tag_name}/{asset_name}"
+    )
+}
 
-    let remote_ver = tag_name.trim_start_matches('v').trim().to_string();
-    if !is_newer_version(&remote_ver, CURRENT_VERSION) {
-        return Ok(None);
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn fetch_latest_release() -> Result<Option<UpdateInfo>, String> {
+    let agent = https_agent(Duration::from_secs(15))?;
+    let mut errors = Vec::new();
+    let mut found_current = false;
+    for (index, url) in manifest_urls().iter().enumerate() {
+        let manifest = match fetch_manifest(&agent, url) {
+            Ok(manifest) => manifest,
+            Err(e) => {
+                errors.push(e);
+                continue;
+            }
+        };
+        if manifest.schema != 1
+            || manifest.tag_name != format!("v{}", manifest.version)
+            || manifest.version.is_empty()
+        {
+            errors.push(format!("更新清单字段无效 ({url})"));
+            continue;
+        }
+        if !is_newer_version(&manifest.version, CURRENT_VERSION) {
+            found_current = true;
+            if index == 0 {
+                return Ok(None);
+            }
+            continue;
+        }
+        #[cfg(target_os = "windows")]
+        let asset = manifest.assets.windows;
+        #[cfg(target_os = "macos")]
+        let asset = manifest.assets.macos;
+        let expected_name = if cfg!(target_os = "windows") {
+            "agentpad-windows-x64.exe"
+        } else {
+            "agentpad-macos-arm64.zip"
+        };
+        let expected_url = expected_asset_url(&manifest.tag_name, expected_name);
+        if asset.name != expected_name
+            || asset.url != expected_url
+            || !valid_sha256(&asset.sha256)
+        {
+            errors.push(format!("更新清单安装包字段无效 ({url})"));
+            continue;
+        }
+        let body = if manifest.body.trim().is_empty() {
+            format!("新版本已发布：{}", manifest.release_url)
+        } else {
+            manifest.body
+        };
+        return Ok(Some(UpdateInfo {
+            tag_name: manifest.tag_name,
+            version: manifest.version,
+            body,
+            download_url: asset.url,
+            sha256: asset.sha256.to_ascii_lowercase(),
+        }));
     }
-
-    let body = v.get("body").and_then(|b| b.as_str()).unwrap_or("").to_string();
-    let assets = v.get("assets").and_then(|a| a.as_array()).ok_or_else(|| "未找到发布文件".to_string())?;
-
-    let expected_asset = if cfg!(target_os = "windows") {
-        "agentpad-windows-x64.exe"
+    if found_current {
+        Ok(None)
     } else {
-        "agentpad-macos-arm64.zip"
-    };
-
-    let download_url = assets
-        .iter()
-        .filter_map(|a| a.get("name").and_then(|n| n.as_str()).map(|n| (n, a)))
-        .find(|(name, _)| *name == expected_asset)
-        .and_then(|(_, a)| {
-            a.get("browser_download_url")
-                .and_then(|u| u.as_str())
-                .map(str::to_string)
-        })
-        .ok_or_else(|| format!("未找到适用的安装包 ({expected_asset})"))?;
-
-    Ok(Some(UpdateInfo {
-        tag_name,
-        version: remote_ver,
-        body,
-        download_url,
-    }))
+        Err(format!("更新清单获取失败：{}", errors.join(" | ")))
+    }
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -211,12 +289,12 @@ fn is_newer_version(remote: &str, current: &str) -> bool {
     r > c
 }
 
-fn https_agent() -> Result<ureq::Agent, String> {
+fn https_agent(timeout: Duration) -> Result<ureq::Agent, String> {
     let tls = ureq::native_tls::TlsConnector::new()
         .map_err(|e| format!("初始化系统 TLS 失败: {e}"))?;
     Ok(ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(15))
-        .timeout(Duration::from_secs(600))
+        .timeout(timeout)
         .tls_connector(Arc::new(tls))
         .build())
 }
@@ -229,8 +307,13 @@ fn download_progress_msg(done: u64, total: u64) -> String {
     }
 }
 
-fn download_with_progress(url: &str, dest: &Path, on_progress: &dyn Fn(u64, u64)) -> Result<(), String> {
-    let agent = https_agent()?;
+fn download_with_progress(
+    url: &str,
+    dest: &Path,
+    expected_sha256: &str,
+    on_progress: &dyn Fn(u64, u64),
+) -> Result<(), String> {
+    let agent = https_agent(Duration::from_secs(600))?;
     let response = agent
         .get(url)
         .set("User-Agent", "AgentPad-Desktop")
@@ -245,6 +328,7 @@ fn download_with_progress(url: &str, dest: &Path, on_progress: &dyn Fn(u64, u64)
         .map_err(|e| format!("创建更新文件失败（目录可能无写入权限）: {e}"))?;
     let mut buf = [0u8; 65536];
     let mut done: u64 = 0;
+    let mut hasher = Sha256::new();
     loop {
         let n = reader.read(&mut buf).map_err(|e| format!("下载中断: {e}"))?;
         if n == 0 {
@@ -252,11 +336,23 @@ fn download_with_progress(url: &str, dest: &Path, on_progress: &dyn Fn(u64, u64)
         }
         file.write_all(&buf[..n])
             .map_err(|e| format!("写入更新文件失败: {e}"))?;
+        hasher.update(&buf[..n]);
         done += n as u64;
         on_progress(done, total);
     }
+    file.flush()
+        .map_err(|e| format!("写入更新文件失败: {e}"))?;
+    drop(file);
     if total > 0 && done != total {
+        let _ = std::fs::remove_file(dest);
         return Err(format!("下载不完整（{done}/{total} 字节）"));
+    }
+    let actual_sha256 = format!("{:x}", hasher.finalize());
+    if !actual_sha256.eq_ignore_ascii_case(expected_sha256) {
+        let _ = std::fs::remove_file(dest);
+        return Err(format!(
+            "更新文件校验失败（期望 {expected_sha256}，实际 {actual_sha256}）"
+        ));
     }
     Ok(())
 }
@@ -270,7 +366,7 @@ fn perform_update(info: &UpdateInfo, status: &Arc<Mutex<UpdateStatus>>) -> Resul
     let report = |done: u64, total: u64| {
         *status.lock().unwrap() = UpdateStatus::Updating(download_progress_msg(done, total));
     };
-    download_with_progress(&info.download_url, &tmp_file, &report)?;
+    download_with_progress(&info.download_url, &tmp_file, &info.sha256, &report)?;
 
     *status.lock().unwrap() = UpdateStatus::Updating("正在替换程序文件...".into());
     let old_path = old_executable_path(&exe_path);
@@ -317,7 +413,7 @@ fn perform_update(info: &UpdateInfo, status: &Arc<Mutex<UpdateStatus>>) -> Resul
         *status.lock().unwrap() = UpdateStatus::Updating(download_progress_msg(done, total));
     };
     let zip_path = tmp_dir.join("agentpad.zip");
-    download_with_progress(&info.download_url, &zip_path, &report)?;
+    download_with_progress(&info.download_url, &zip_path, &info.sha256, &report)?;
 
     *status.lock().unwrap() = UpdateStatus::Updating("正在解压更新...".into());
     let unzip_ok = Command::new("unzip")
@@ -430,6 +526,39 @@ mod tests {
         assert!(is_newer_version("0.1.1", "0.1.0"));
         assert!(!is_newer_version("0.1.0", "0.1.0"));
         assert!(!is_newer_version("0.0.9", "0.1.0"));
+    }
+
+    #[test]
+    fn parses_update_manifest_and_validates_hashes() {
+        let manifest: UpdateManifest = serde_json::from_str(
+            r#"{
+              "schema": 1,
+              "tag_name": "v1.2.3",
+              "version": "1.2.3",
+              "release_url": "https://example.com/v1.2.3",
+              "body": "notes",
+              "assets": {
+                "windows": {"name":"agentpad-windows-x64.exe","url":"https://example.com/a.exe","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                "macos": {"name":"agentpad-macos-arm64.zip","url":"https://example.com/a.zip","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+                "android": {"name":"agentpad.apk","url":"https://example.com/a.apk","sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+              }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(manifest.schema, 1);
+        assert_eq!(manifest.version, "1.2.3");
+        assert!(valid_sha256(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        ));
+        assert!(!valid_sha256("not-a-sha"));
+        let urls = manifest_urls();
+        assert!(urls[0].contains("releases/latest/download"));
+        assert!(urls[1].contains("cdn.jsdelivr.net"));
+        assert!(urls[2].contains("cdn.jsdmirror.com"));
+        assert_eq!(
+            expected_asset_url("v1.2.3", "agentpad-macos-arm64.zip"),
+            "https://github.com/MitsukiJoe/AgentPad/releases/download/v1.2.3/agentpad-macos-arm64.zip"
+        );
     }
 
     #[test]

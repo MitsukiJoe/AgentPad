@@ -21,10 +21,104 @@ const appVersion = String.fromEnvironment(
   defaultValue: '0.1.0',
 );
 
+class AndroidUpdateInfo {
+  const AndroidUpdateInfo({
+    required this.tagName,
+    required this.version,
+    required this.body,
+    required this.apkUrl,
+    required this.sha256,
+  });
+
+  final String tagName;
+  final String version;
+  final String body;
+  final String apkUrl;
+  final String sha256;
+}
+
+List<Uri> androidUpdateManifestUris([DateTime? now]) {
+  final hour = (now ?? DateTime.now()).toUtc().millisecondsSinceEpoch ~/ 3600000;
+  const path = 'gh/MitsukiJoe/AgentPad@update-manifest/agentpad-update.json';
+  return [
+    Uri.parse(
+      'https://github.com/MitsukiJoe/AgentPad/releases/latest/download/agentpad-update.json',
+    ),
+    Uri.parse('https://cdn.jsdelivr.net/$path?hour=$hour'),
+    Uri.parse('https://cdn.jsdmirror.com/$path?hour=$hour'),
+  ];
+}
+
+bool isNewerAppVersion(String remote, String current) {
+  List<int> parse(String value) => value
+      .split('.')
+      .map((part) => int.tryParse(part.replaceAll(RegExp(r'\D'), '')) ?? 0)
+      .toList();
+  final remoteParts = parse(remote);
+  final currentParts = parse(current);
+  for (var i = 0; i < remoteParts.length && i < currentParts.length; i++) {
+    if (remoteParts[i] > currentParts[i]) return true;
+    if (remoteParts[i] < currentParts[i]) return false;
+  }
+  return remoteParts.length > currentParts.length;
+}
+
+AndroidUpdateInfo newerAndroidUpdate(
+  AndroidUpdateInfo? current,
+  AndroidUpdateInfo candidate,
+) {
+  if (current == null || isNewerAppVersion(candidate.version, current.version)) {
+    return candidate;
+  }
+  return current;
+}
+
+AndroidUpdateInfo? parseAndroidUpdateManifest(String raw) {
+  try {
+    final data = jsonDecode(raw);
+    if (data is! Map || data['schema'] != 1 || data['assets'] is! Map) {
+      return null;
+    }
+    final tagName = data['tag_name'] as String? ?? '';
+    final version = data['version'] as String? ?? '';
+    final releaseUrl = data['release_url'] as String? ?? '';
+    final body = data['body'] as String? ?? '';
+    final assets = data['assets'] as Map;
+    final android = assets['android'];
+    if (android is! Map ||
+        tagName != 'v$version' ||
+        version.isEmpty) {
+      return null;
+    }
+    final apkUrl = android['url'] as String? ?? '';
+    final sha256 = (android['sha256'] as String? ?? '').toLowerCase();
+    final expectedUrl =
+        'https://github.com/MitsukiJoe/AgentPad/releases/download/$tagName/agentpad.apk';
+    if (apkUrl != expectedUrl ||
+        !RegExp(r'^[0-9a-f]{64}$').hasMatch(sha256)) {
+      return null;
+    }
+    return AndroidUpdateInfo(
+      tagName: tagName,
+      version: version,
+      body: body.trim().isEmpty ? '新版本已发布：$releaseUrl' : body,
+      apkUrl: apkUrl,
+      sha256: sha256,
+    );
+  } catch (_) {
+    return null;
+  }
+}
+
 class AgentPadApp extends StatefulWidget {
-  const AgentPadApp({super.key, this.store});
+  const AgentPadApp({
+    super.key,
+    this.store,
+    this.enableAutomaticUpdateChecks = true,
+  });
 
   final PadStore? store;
+  final bool enableAutomaticUpdateChecks;
 
   @override
   State<AgentPadApp> createState() => _AgentPadAppState();
@@ -59,15 +153,25 @@ class _AgentPadAppState extends State<AgentPadApp> {
         _ => ThemeMode.system,
       },
       home: ready
-          ? HomePage(store: store, onThemeChanged: () => setState(() {}))
+          ? HomePage(
+              store: store,
+              enableAutomaticUpdateChecks: widget.enableAutomaticUpdateChecks,
+              onThemeChanged: () => setState(() {}),
+            )
           : const Scaffold(body: SizedBox.shrink()),
     );
   }
 }
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key, required this.store, this.onThemeChanged});
+  const HomePage({
+    super.key,
+    required this.store,
+    required this.enableAutomaticUpdateChecks,
+    this.onThemeChanged,
+  });
   final PadStore store;
+  final bool enableAutomaticUpdateChecks;
   final VoidCallback? onThemeChanged;
 
   @override
@@ -138,11 +242,15 @@ class _HomePageState extends State<HomePage> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       _applyAppIcon(store.appIcon);
-      unawaited(_checkAndroidUpdate(notify: false));
+      if (widget.enableAutomaticUpdateChecks) {
+        unawaited(_checkAndroidUpdate(notify: false));
+      }
     });
-    updateCheckTimer = Timer.periodic(_updateCheckInterval, (_) {
-      if (mounted) unawaited(_checkAndroidUpdate(notify: false));
-    });
+    if (widget.enableAutomaticUpdateChecks) {
+      updateCheckTimer = Timer.periodic(_updateCheckInterval, (_) {
+        if (mounted) unawaited(_checkAndroidUpdate(notify: false));
+      });
+    }
   }
 
   Future<void> _applyPointerHzDefault() async {
@@ -2085,47 +2193,56 @@ class _HomePageState extends State<HomePage> {
     try {
       client = HttpClient();
       client.connectionTimeout = const Duration(seconds: 8);
-      final request = await client.getUrl(
-        Uri.parse('https://api.github.com/repos/MitsukiJoe/AgentPad/releases/latest'),
-      );
-      request.headers.set('User-Agent', 'AgentPad-Android');
-      request.headers.set('Accept', 'application/vnd.github.v3+json');
-      final response = await request.close();
-
-      if (response.statusCode != 200) {
-        if (mounted && notify) {
-          _showUpdateNotice('检查更新失败 (HTTP ${response.statusCode})');
-        }
-        return;
-      }
-
-      final bodyString = await response.transform(utf8.decoder).join();
-      final data = jsonDecode(bodyString) as Map<String, dynamic>;
-      final tagName = (data['tag_name'] as String? ?? '').replaceFirst('v', '').trim();
-      final body = data['body'] as String? ?? '';
-      final assets = data['assets'] as List<dynamic>? ?? [];
-
-      String? apkUrl;
-      for (final a in assets) {
-        if (a is Map<String, dynamic>) {
-          final name = a['name'] as String? ?? '';
-          if (name.endsWith('.apk')) {
-            apkUrl = a['browser_download_url'] as String?;
+      AndroidUpdateInfo? latest;
+      String? lastError;
+      final sources = androidUpdateManifestUris();
+      for (var index = 0; index < sources.length; index++) {
+        final uri = sources[index];
+        try {
+          final request = await client.getUrl(uri);
+          request.headers.set('User-Agent', 'AgentPad-Android');
+          request.headers.set('Accept', 'application/json');
+          final response = await request.close().timeout(
+            const Duration(seconds: 12),
+          );
+          if (response.statusCode != 200) {
+            lastError = '$uri: HTTP ${response.statusCode}';
+            continue;
+          }
+          final raw = await response
+              .transform(utf8.decoder)
+              .join()
+              .timeout(const Duration(seconds: 12));
+          final candidate = parseAndroidUpdateManifest(raw);
+          if (candidate == null) {
+            lastError = '$uri: 更新清单格式无效';
+            continue;
+          }
+          if (index == 0) {
+            latest = candidate;
             break;
           }
+          latest = newerAndroidUpdate(latest, candidate);
+        } catch (e) {
+          lastError = '$uri: $e';
         }
       }
-
+      if (latest == null) {
+        if (mounted && notify) _showUpdateNotice('检查更新失败');
+        if (lastError != null) debugPrint('update manifest: $lastError');
+        return;
+      }
+      final update = latest;
       const currentVer = appVersion;
-      if (_isNewerVersion(tagName, currentVer) && apkUrl != null) {
+      if (_isNewerVersion(update.version, currentVer)) {
         if (!mounted) return;
         setState(() {
-          pendingUpdateTag = tagName;
-          pendingUpdateBody = body;
-          pendingUpdateApkUrl = apkUrl;
+          pendingUpdateTag = update.version;
+          pendingUpdateBody = update.body;
+          pendingUpdateApkUrl = update.apkUrl;
         });
         refresh?.call();
-        if (notify) _showUpdateNotice('发现新版本 v$tagName');
+        if (notify) _showUpdateNotice('发现新版本 v${update.version}');
       } else if (mounted) {
         setState(() {
           pendingUpdateTag = null;
@@ -2243,19 +2360,8 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  bool _isNewerVersion(String remote, String current) {
-    List<int> parse(String v) => v
-        .split('.')
-        .map((s) => int.tryParse(s.replaceAll(RegExp(r'\D'), '')) ?? 0)
-        .toList();
-    final r = parse(remote);
-    final c = parse(current);
-    for (var i = 0; i < r.length && i < c.length; i++) {
-      if (r[i] > c[i]) return true;
-      if (r[i] < c[i]) return false;
-    }
-    return r.length > c.length;
-  }
+  bool _isNewerVersion(String remote, String current) =>
+      isNewerAppVersion(remote, current);
 
   Future<void> _openFloatingPanel({
     required Widget Function(BuildContext ctx, StateSetter setSheet) builder,

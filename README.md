@@ -229,22 +229,22 @@ If you encounter connection issues or unexpected behavior, access logs via the d
 
 ## Automatic Checks and Confirmed Updates
 
-AgentPad includes a lightweight cross-platform update channel backed by the public GitHub Releases API. All three clients share the same check rhythm; downloads and installation always require user confirmation, and the app never updates itself unattended:
+AgentPad uses a lightweight cross-platform update channel. Every stable Release includes a small manifest containing the version, download URLs, and SHA-256 values. Clients read the GitHub Release asset first and fall back to two CDN mirrors, avoiding dependence on GitHub REST API quotas. All three clients share the same check rhythm; downloads and installation always require user confirmation, and the app never updates itself unattended:
 
 - **Automatic check schedule**:
   - The desktop and Android apps perform one background check after every launch;
   - While an app remains running, it checks again every 24 hours from startup. Restarting starts a new process and therefore performs another launch check;
-  - Checks use an in-process HTTPS client and never open CMD, a terminal, or an unattended download;
+  - Checks use an in-process HTTPS client and fall back through the CDN mirrors when the primary source is unavailable; they never open CMD, a terminal, or an unattended download;
   - Background checks and automatic notifications do not open dialogs on their own: desktop only updates the status at the top of its window. On Android, a newer release appears as a green dot and an "Update" badge beside the version number at the bottom of the home screen; the confirmation dialog opens only after you tap it. The manual "Check for Updates" command reports checking, up-to-date, or failure.
 - **Visible version status**:
   - The desktop pairing window always shows the running version beside the listening port;
   - When a newer release is found, an "**Update to vX.Y.Z**" button appears. Download and replacement begin only after the user clicks it.
 - **Windows (In-Process Download and Self-Replacement)**:
   - After the user clicks "Update to vX.Y.Z," AgentPad downloads the new `agentpad-windows-x64.exe` through its in-process HTTPS client and reports progress in the UI; it does not invoke CMD, an updater script, or the system `curl`;
-  - Once the download completes, the running EXE is renamed to `.old`, the new executable takes the original path and launches directly, then the old process exits. Failures are surfaced in the UI and the updater attempts to restore the previous executable;
+  - Once the download completes, AgentPad verifies its SHA-256 value before renaming the running EXE to `.old`, placing the new executable at the original path, and relaunching. A failed verification or replacement keeps the previous version and surfaces the reason in the UI;
   - On startup, AgentPad removes `.old` / `.new` update residue. A legacy `agentpad_updater.bat` left by older releases is removed only when its contents match the former AgentPad updater, avoiding accidental deletion of user files.
 - **macOS (Automatic App Bundle Swap)**:
-  - After the user clicks "Update to vX.Y.Z," AgentPad downloads and extracts `agentpad-macos-arm64.zip` in the background;
+  - After the user clicks "Update to vX.Y.Z," AgentPad downloads `agentpad-macos-arm64.zip`, verifies its SHA-256 value from the manifest, and only then extracts it;
   - When running from any `.app` bundle in a writable location, AgentPad renames the old bundle aside, places the new bundle at the original path, and launches it through `open -n`; this is not restricted to `/Applications`;
   - If the bundle cannot be swapped by rename, AgentPad falls back to an in-place `ditto` copy. Only non-bundle development builds open the extracted directory for manual handling; no DMG mount is required.
 - **Android (System Installer Confirmation)**:

@@ -16,7 +16,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     await tester.pump();
     expect(find.text('发送'), findsNothing);
     final send = tester.widget<FilledButton>(
@@ -113,7 +113,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     expect(find.byKey(const ValueKey('home-pointer-mode')), findsOneWidget);
 
     await tester.tap(find.byTooltip('设置'));
@@ -148,7 +148,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     await tester.tap(find.byTooltip('设置'));
     await tester.pumpAndSettle();
     expect(find.text('滚轮位置'), findsOneWidget);
@@ -259,7 +259,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.display.resetSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     await tester.tap(find.byTooltip('设置'));
     await tester.pumpAndSettle();
 
@@ -284,7 +284,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
 
     final pointerBottom = tester
         .getBottomLeft(find.byKey(const ValueKey('pointer-area')))
@@ -360,7 +360,7 @@ void main() {
       SharedPreferences.setMockInitialValues({});
       final store = PadStore();
       await store.load();
-      await tester.pumpWidget(AgentPadApp(store: store));
+      await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
       await tester.tap(find.byTooltip('设置'));
       await tester.pumpAndSettle();
 
@@ -435,7 +435,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     final app = tester.widget<MaterialApp>(find.byType(MaterialApp));
     final light = app.theme!;
     final dark = app.darkTheme!;
@@ -484,7 +484,11 @@ void main() {
       SharedPreferences.setMockInitialValues({'theme_color': color});
       final store = PadStore();
       await store.load();
-      await tester.pumpWidget(AgentPadApp(key: ValueKey(color), store: store));
+      await tester.pumpWidget(AgentPadApp(
+        key: ValueKey(color),
+        store: store,
+        enableAutomaticUpdateChecks: false,
+      ));
       final app = tester.widget<MaterialApp>(find.byType(MaterialApp));
       expectedLight ??= app.theme?.colorScheme;
       expectedDark ??= app.darkTheme?.colorScheme;
@@ -536,7 +540,7 @@ void main() {
     });
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     final app = tester.widget<MaterialApp>(find.byType(MaterialApp));
     final send = tester.widget<FilledButton>(
       find.byKey(const ValueKey('send-button')),
@@ -559,14 +563,14 @@ void main() {
     });
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     final redSend = tester.widget<FilledButton>(
       find.byKey(const ValueKey('send-button')),
     );
     expect(redSend.style?.foregroundColor?.resolve({}), Colors.white);
 
     store.themeColor = 'blue';
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     await tester.pump();
     final blueSend = tester.widget<FilledButton>(
       find.byKey(const ValueKey('send-button')),
@@ -583,7 +587,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     addTearDown(tester.view.resetViewInsets);
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     expect(
       tester.getSize(find.byKey(const ValueKey('pointer-area'))).height,
       240,
@@ -608,7 +612,7 @@ void main() {
     );
 
     store.pointerSize = 'small';
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     await tester.pump();
     await tester.tap(find.text('轨迹球'));
     await tester.pump();
@@ -642,7 +646,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     SingleChildScrollView page() =>
         tester.widget(find.byKey(const ValueKey('page-scroll')));
     expect(page().physics, isNot(isA<NeverScrollableScrollPhysics>()));
@@ -662,7 +666,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     final gesture = await tester.startGesture(
       tester.getCenter(find.byKey(const ValueKey('pointer-input'))),
     );
@@ -680,7 +684,7 @@ void main() {
     tester.view.devicePixelRatio = 3;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     await tester.pump();
     final actionLeft = tester
         .getTopLeft(find.byKey(const ValueKey('action-voice-auto-send')))
@@ -719,7 +723,11 @@ void main() {
       final store = PadStore();
       await store.load();
       await tester.pumpWidget(
-        AgentPadApp(key: ValueKey('touchpad-$mode'), store: store),
+        AgentPadApp(
+          key: ValueKey('touchpad-$mode'),
+          store: store,
+          enableAutomaticUpdateChecks: false,
+        ),
       );
 
       final pad = tester.widget<DecoratedBox>(
@@ -756,7 +764,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     SingleChildScrollView page() =>
         tester.widget(find.byKey(const ValueKey('page-scroll')));
     final center = tester.getCenter(
@@ -788,7 +796,7 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     await tester.pump();
 
     final vertical = find.descendant(
@@ -817,7 +825,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     expect(find.text('撤回上次输入'), findsOneWidget);
     expect(find.text('电脑自动回车'), findsOneWidget);
     expect(find.text('语音自动发送'), findsOneWidget);
@@ -873,7 +881,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     final button = tester.widget<TextButton>(
       find.byKey(const ValueKey('connection-status')),
     );
@@ -899,7 +907,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     expect(
       find.text(
         '单指：单击左键 / 长按拖动区选 / 长按松开右键\n'
@@ -913,7 +921,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
 
     await tester.longPress(find.text('语音自动发送'));
     await tester.pumpAndSettle();
@@ -950,7 +958,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     expect(find.text('长按设备可删除，拖动可排序'), findsNothing);
     await tester.tap(find.byKey(const ValueKey('connection-status')));
     await tester.pumpAndSettle();
@@ -963,7 +971,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final empty = PadStore();
     await empty.load();
-    await tester.pumpWidget(AgentPadApp(store: empty));
+    await tester.pumpWidget(AgentPadApp(store: empty, enableAutomaticUpdateChecks: false));
     expect(find.text('未连接'), findsOneWidget);
     expect(
       find.byKey(const ValueKey('connection-icon-disconnected')),
@@ -980,7 +988,7 @@ void main() {
       ..devices = [
         Device(deviceId: 'a', name: 'Mac', ips: const [], port: 9618),
       ];
-    await tester.pumpWidget(AgentPadApp(store: saved));
+    await tester.pumpWidget(AgentPadApp(store: saved, enableAutomaticUpdateChecks: false));
     await tester.pump();
     expect(find.text('连接中'), findsOneWidget);
     expect(
@@ -1004,7 +1012,7 @@ void main() {
         Device(deviceId: 'a', name: 'Mac', ips: const [], port: 9618),
         Device(deviceId: 'b', name: 'PC', ips: const [], port: 9618),
       ];
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     await tester.pump();
 
     final strip = tester.widget<ListView>(
@@ -1121,7 +1129,7 @@ void main() {
     SharedPreferences.setMockInitialValues({'theme': 'dark'});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     await tester.tap(find.text('轨迹球'));
     await tester.pump();
 
@@ -1141,7 +1149,7 @@ void main() {
       ..devices = [
         Device(deviceId: 'a', name: 'Mac', ips: const [], port: 9618),
       ];
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     await tester.tap(find.byKey(const ValueKey('connection-status')));
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('device-drag-a')), findsOneWidget);
@@ -1156,7 +1164,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     expect(
       tester.getCenter(find.byTooltip('关于')).dx,
       lessThan(tester.getCenter(find.byTooltip('设置')).dx),
@@ -1227,7 +1235,7 @@ void main() {
       );
     });
 
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     await tester.pump();
     await tester.pump();
     expect(find.text('已连接 1 台'), findsOneWidget);
@@ -1279,7 +1287,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     addTearDown(tester.view.resetViewInsets);
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     await tester.pump();
     expect(find.byKey(const ValueKey('send-button')), findsOneWidget);
     expect(tester.takeException(), isNull);
@@ -1297,7 +1305,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.display.resetSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     await tester.pump();
 
     expect(find.byKey(const ValueKey('landscape-pointer-pane')), findsNothing);
@@ -1322,7 +1330,7 @@ void main() {
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.display.resetSize);
       addTearDown(tester.view.resetDevicePixelRatio);
-      await tester.pumpWidget(AgentPadApp(store: store));
+      await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
       await tester.pump();
 
       final pointerPane = find.byKey(const ValueKey('landscape-pointer-pane'));
@@ -1393,7 +1401,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.display.resetSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     await tester.pump();
 
     await tester.tap(find.byTooltip('设置'));
@@ -1426,7 +1434,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     await tester.pump();
 
     final dynamic home = tester.state(find.byType(HomePage));

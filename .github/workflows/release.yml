@@ -291,6 +291,11 @@ jobs:
       - build-android
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
       - name: Download all built artifacts
         uses: actions/download-artifact@v8
         with:
@@ -305,16 +310,84 @@ jobs:
           test -s agentpad.apk
           sha256sum agentpad-windows-x64.exe agentpad-macos-arm64.dmg agentpad-macos-arm64.zip agentpad.apk
 
+      - name: Create update manifest
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.prepare-version.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.prepare-version.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+            -f tag_name="$RELEASE_TAG" \
+            -f target_commitish="$GITHUB_SHA" \
+            --jq .body > release-notes.md
+          base_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG"
+          windows_sha="$(sha256sum agentpad-windows-x64.exe | awk '{print $1}')"
+          macos_sha="$(sha256sum agentpad-macos-arm64.zip | awk '{print $1}')"
+          android_sha="$(sha256sum agentpad.apk | awk '{print $1}')"
+          jq -n \
+            --arg tag_name "$RELEASE_TAG" \
+            --arg version "$RELEASE_VERSION" \
+            --arg release_url "https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG" \
+            --arg windows_url "$base_url/agentpad-windows-x64.exe" \
+            --arg windows_sha "$windows_sha" \
+            --arg macos_url "$base_url/agentpad-macos-arm64.zip" \
+            --arg macos_sha "$macos_sha" \
+            --arg android_url "$base_url/agentpad.apk" \
+            --arg android_sha "$android_sha" \
+            --rawfile body release-notes.md \
+            '{
+              schema: 1,
+              tag_name: $tag_name,
+              version: $version,
+              release_url: $release_url,
+              body: $body,
+              assets: {
+                windows: {name: "agentpad-windows-x64.exe", url: $windows_url, sha256: $windows_sha},
+                macos: {name: "agentpad-macos-arm64.zip", url: $macos_url, sha256: $macos_sha},
+                android: {name: "agentpad.apk", url: $android_url, sha256: $android_sha}
+              }
+            }' > agentpad-update.json
+          jq -e '.schema == 1 and (.version | length > 0) and (.assets.windows.sha256 | length == 64) and (.assets.macos.sha256 | length == 64) and (.assets.android.sha256 | length == 64)' agentpad-update.json >/dev/null
+
       - name: Create tag and GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare-version.outputs.tag }}
           name: AgentPad ${{ needs.prepare-version.outputs.tag }}
           target_commitish: ${{ github.sha }}
-          generate_release_notes: true
+          body_path: release-notes.md
           fail_on_unmatched_files: true
           files: |
             agentpad-windows-x64.exe
             agentpad-macos-arm64.dmg
             agentpad-macos-arm64.zip
             agentpad.apk
+            agentpad-update.json
+
+      - name: Publish update manifest branch
+        continue-on-error: true
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.prepare-version.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan update-manifest-publish
+          git rm -rf .
+          git add -f agentpad-update.json
+          git commit -m "chore: publish update manifest for $RELEASE_TAG"
+          git push --force origin HEAD:update-manifest
+
+      - name: Refresh update CDN caches
+        continue-on-error: true
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.prepare-version.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.prepare-version.outputs.version }}
+        run: |
+          path="gh/$GITHUB_REPOSITORY@update-manifest/agentpad-update.json"
+          curl --fail --silent --show-error --retry 2 "https://purge.jsdelivr.net/$path" >/dev/null
+          curl --fail --silent --show-error --retry 2 \
+            "https://cdn.jsdmirror.com/$path?release=$RELEASE_TAG" \
+            | jq -e --arg version "$RELEASE_VERSION" '.version == $version' >/dev/null
