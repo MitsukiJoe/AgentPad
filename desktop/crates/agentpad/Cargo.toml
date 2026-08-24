@@ -15,6 +15,7 @@ winit = "0.30"
 agentpad-input = { path = "../agentpad-input" }
 arboard = "3"
 eframe = "0.36"
+egui_material_icons = "0.8"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 netdev = { version = "0.46.1", default-features = false }
 qrcode = { version = "0.14", default-features = false }

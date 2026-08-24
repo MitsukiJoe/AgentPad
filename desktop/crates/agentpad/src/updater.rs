@@ -15,6 +15,7 @@ pub const CURRENT_VERSION: &str = match option_env!("AGENTPAD_VERSION") {
     None => env!("CARGO_PKG_VERSION"),
 };
 pub const GITHUB_REPO: &str = "MitsukiJoe/AgentPad";
+#[cfg(any(target_os = "windows", test))]
 const AFTER_UPDATE_FLAG: &str = "--after-update";
 #[cfg(target_os = "windows")]
 const POST_UPDATE_ENV: &str = "AGENTPAD_POST_UPDATE";

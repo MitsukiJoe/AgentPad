@@ -5,6 +5,8 @@ use eframe::egui::{
     self, FontData, FontDefinitions, FontFamily, TextureHandle, TextureOptions, ThemePreference,
     Vec2,
 };
+use egui_material_icons::icons::{ICON_COMPUTER, ICON_DARK_MODE, ICON_LIGHT_MODE};
+use egui_material_icons::MaterialIcon;
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
@@ -48,6 +50,7 @@ pub struct PairingApp {
 impl PairingApp {
     pub fn new(cc: &eframe::CreationContext<'_>, state: Arc<AppState>) -> Self {
         install_cjk_font(&cc.egui_ctx);
+        egui_material_icons::initialize(&cc.egui_ctx);
         let theme = theme_from_str(&crate::identity::load_theme());
         cc.egui_ctx.set_theme(theme);
         apply_app_style(&cc.egui_ctx);
@@ -459,7 +462,6 @@ impl eframe::App for PairingApp {
                                         ui,
                                         &mut self.theme,
                                         ThemePreference::Dark,
-                                        "深色",
                                         accent,
                                         surface,
                                         border,
@@ -468,7 +470,6 @@ impl eframe::App for PairingApp {
                                         ui,
                                         &mut self.theme,
                                         ThemePreference::Light,
-                                        "浅色",
                                         accent,
                                         surface,
                                         border,
@@ -477,7 +478,6 @@ impl eframe::App for PairingApp {
                                         ui,
                                         &mut self.theme,
                                         ThemePreference::System,
-                                        "系统",
                                         accent,
                                         surface,
                                         border,
@@ -712,18 +712,26 @@ impl eframe::App for PairingApp {
     }
 }
 
+fn theme_icon_spec(theme: ThemePreference) -> (MaterialIcon, &'static str) {
+    match theme {
+        ThemePreference::System => (ICON_COMPUTER, "跟随系统"),
+        ThemePreference::Light => (ICON_LIGHT_MODE, "浅色模式"),
+        ThemePreference::Dark => (ICON_DARK_MODE, "深色模式"),
+    }
+}
+
 fn theme_chip(
     ui: &mut egui::Ui,
     cur: &mut ThemePreference,
     this: ThemePreference,
-    label: &str,
     accent: egui::Color32,
     surface: egui::Color32,
     border: egui::Color32,
     muted: egui::Color32,
 ) -> bool {
     let selected = *cur == this;
-    let button = egui::Button::new(egui::RichText::new(label).size(13.0).color(if selected {
+    let (icon, tooltip) = theme_icon_spec(this);
+    let button = egui::Button::new(icon.rich_text().size(18.0).color(if selected {
         egui::Color32::from_rgb(20, 20, 20)
     } else {
         muted
@@ -734,7 +742,10 @@ fn theme_chip(
         if selected { accent } else { border },
     ))
     .corner_radius(9);
-    if ui.add_sized(Vec2::new(56.0, 34.0), button).clicked() {
+    let response = ui
+        .add_sized(Vec2::new(40.0, 34.0), button)
+        .on_hover_text(tooltip);
+    if response.clicked() {
         *cur = this;
         true
     } else {
@@ -890,6 +901,21 @@ fn tray_icon(dark: bool) -> Icon {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn theme_buttons_use_material_icons_and_tooltips() {
+        let (system, system_tip) = theme_icon_spec(ThemePreference::System);
+        let (light, light_tip) = theme_icon_spec(ThemePreference::Light);
+        let (dark, dark_tip) = theme_icon_spec(ThemePreference::Dark);
+        assert_eq!(system.codepoint, ICON_COMPUTER.codepoint);
+        assert_eq!(light.codepoint, ICON_LIGHT_MODE.codepoint);
+        assert_eq!(dark.codepoint, ICON_DARK_MODE.codepoint);
+        assert_eq!(system_tip, "跟随系统");
+        assert_eq!(light_tip, "浅色模式");
+        assert_eq!(dark_tip, "深色模式");
+        assert_ne!(system.codepoint, light.codepoint);
+        assert_ne!(light.codepoint, dark.codepoint);
+    }
 
     #[test]
     fn tray_theme_icons_are_distinct_and_high_resolution() {
