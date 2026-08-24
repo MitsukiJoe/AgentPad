@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "tag_name": "v0.1.7",
+  "version": "0.1.7",
+  "release_url": "https://github.com/MitsukiJoe/AgentPad/releases/tag/v0.1.7",
+  "body": "**Full Changelog**: https://github.com/MitsukiJoe/AgentPad/compare/v0.1.6...v0.1.7\n",
+  "assets": {
+    "windows": {
+      "name": "agentpad-windows-x64.exe",
+      "url": "https://github.com/MitsukiJoe/AgentPad/releases/download/v0.1.7/agentpad-windows-x64.exe",
+      "sha256": "9146a48eab8c4be728252006932ca4de3946a674a85044e91db9d835386248d1"
+    },
+    "macos": {
+      "name": "agentpad-macos-arm64.zip",
+      "url": "https://github.com/MitsukiJoe/AgentPad/releases/download/v0.1.7/agentpad-macos-arm64.zip",
+      "sha256": "a86c4872db9fba13b390b62df4542188be7028340d0a8f7463fc5361e0ea0b7e"
+    },
+    "android": {
+      "name": "agentpad.apk",
+      "url": "https://github.com/MitsukiJoe/AgentPad/releases/download/v0.1.7/agentpad.apk",
+      "sha256": "f4174f033e3fb0f5c665c58301bd9ff805baec679701a8571b241807098b7cfa"
+    }
+  }
+}
