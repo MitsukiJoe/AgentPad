@@ -11,6 +11,9 @@ use crate::handle::{self, Conn};
 use crate::identity::Identity;
 use crate::protocol::{InMsg, OutMsg};
 
+const POST_UPDATE_BIND_ATTEMPTS: usize = 50;
+const POST_UPDATE_BIND_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+
 pub struct AppState {
     pub identity: Identity,
     pub paused: AtomicBool,
@@ -46,6 +49,31 @@ pub async fn serve(state: Arc<AppState>, bind: SocketAddr) -> std::io::Result<So
     crate::logutil::write(&format!("ws listen {addr}"));
     tokio::spawn(accept_loop(listener, state));
     Ok(addr)
+}
+
+pub async fn serve_with_retry(
+    state: Arc<AppState>,
+    bind: SocketAddr,
+    post_update: bool,
+) -> std::io::Result<SocketAddr> {
+    let attempts = if post_update {
+        POST_UPDATE_BIND_ATTEMPTS
+    } else {
+        1
+    };
+    for attempt in 0..attempts {
+        match serve(state.clone(), bind).await {
+            Err(e)
+                if post_update
+                    && e.kind() == std::io::ErrorKind::AddrInUse
+                    && attempt + 1 < attempts =>
+            {
+                tokio::time::sleep(POST_UPDATE_BIND_DELAY).await;
+            }
+            result => return result,
+        }
+    }
+    unreachable!("retry loop always returns")
 }
 
 async fn accept_loop(listener: TcpListener, state: Arc<AppState>) {
@@ -250,6 +278,35 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn ordinary_second_instance_does_not_retry() {
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = held.local_addr().unwrap();
+        let state = AppState::new(Identity {
+            device_id: "dev-1".into(),
+            name: "TestMac".into(),
+        });
+        let err = serve_with_retry(state, addr, false).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
+    }
+
+    #[tokio::test]
+    async fn post_update_waits_for_previous_listener() {
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = held.local_addr().unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            drop(held);
+        });
+        let state = AppState::new(Identity {
+            device_id: "dev-1".into(),
+            name: "TestMac".into(),
+        });
+        let bound = serve_with_retry(state, addr, true).await.unwrap();
+        release.join().unwrap();
+        assert_eq!(bound, addr);
     }
 
     #[tokio::test]

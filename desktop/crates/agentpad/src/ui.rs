@@ -517,7 +517,7 @@ impl eframe::App for PairingApp {
                                 ),
                                 PermissionNotice::NeedsAccess => (
                                     "需要辅助功能权限",
-                                    "用于从手机发送按键并控制指针。系统设置中的授权对象应显示为 AgentPad。",
+                                    "用于从手机发送按键并控制指针。若更新后列表里已有 AgentPad 但授权无效，请先删除旧项，再点击下方按钮为当前版本重新授权。",
                                 ),
                             };
                             ui.label(egui::RichText::new(title).strong());

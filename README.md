@@ -139,20 +139,26 @@ Launch desktop app → Ensure phone & PC are on the same LAN (or hotspot/VLAN) �
 
 #### First Launch on macOS
 
-The current macOS build ships with ad-hoc code signing. The first double-click may be blocked by Gatekeeper (the app may be reported as damaged or from an unidentified developer). To proceed — **there is no need to disable Gatekeeper**:
+If macOS blocks AgentPad the first time you open it, use either option below. First make sure the app came from this project's official GitHub Release and has been moved into Applications.
 
-1. After the first double-click is blocked, open **System Settings → Privacy & Security → Security**;
-2. At the block notice, click **"Open Anyway"**;
-3. Confirm with your password or Touch ID;
-4. The app will open normally from then on — no further steps required.
+##### Terminal Command
 
-Optional CLI alternative (only if you can confirm the build was downloaded from this project's official GitHub Release):
+Open Terminal, then copy and run:
 
 ```bash
-xattr -dr com.apple.quarantine /path/to/AgentPad.app
+xattr -dr com.apple.quarantine /Applications/AgentPad.app
 ```
 
-> There is no need to disable Gatekeeper, and `spctl --master-disable` is not recommended (it turns off system-wide verification).
+Open AgentPad again when the command finishes.
+
+##### Graphical Steps
+
+1. Open **System Settings → Privacy & Security → Security**;
+2. Find the AgentPad notice and click **"Open Anyway"**;
+3. Confirm with your password or Touch ID;
+4. Return to Applications and open AgentPad again.
+
+> There is no need to disable Gatekeeper, and `spctl --master-disable` is not recommended.
 
 ---
 

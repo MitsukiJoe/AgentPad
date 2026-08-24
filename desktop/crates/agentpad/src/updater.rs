@@ -1,8 +1,8 @@
 use std::io::{Read, Write};
-use std::path::Path;
-#[cfg(target_os = "macos")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(any(target_os = "windows", test))]
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -12,6 +12,9 @@ pub const CURRENT_VERSION: &str = match option_env!("AGENTPAD_VERSION") {
     None => env!("CARGO_PKG_VERSION"),
 };
 pub const GITHUB_REPO: &str = "MitsukiJoe/AgentPad";
+const AFTER_UPDATE_FLAG: &str = "--after-update";
+#[cfg(target_os = "windows")]
+const POST_UPDATE_ENV: &str = "AGENTPAD_POST_UPDATE";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct UpdateInfo {
@@ -142,6 +145,61 @@ fn fetch_latest_release() -> Result<Option<UpdateInfo>, String> {
     }))
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn old_executable_path(exe: &Path) -> PathBuf {
+    let parent = exe.parent().unwrap_or_else(|| Path::new(""));
+    let name = exe
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    parent.join(format!("{name}.old"))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn after_update_parent_pid(args: &[std::ffi::OsString]) -> Option<u32> {
+    args.windows(2).find_map(|pair| {
+        (pair[0] == AFTER_UPDATE_FLAG)
+            .then(|| pair[1].to_string_lossy().parse().ok())
+            .flatten()
+    })
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn is_post_update_launch_for(exe: &Path, env_flag: bool, args: &[std::ffi::OsString]) -> bool {
+    env_flag || after_update_parent_pid(args).is_some() || old_executable_path(exe).exists()
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn configure_relaunch(command: &mut Command, parent_pid: u32) {
+    command
+        .arg(AFTER_UPDATE_FLAG)
+        .arg(parent_pid.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
+pub fn is_post_update_launch() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let env_flag = std::env::var_os(POST_UPDATE_ENV).is_some();
+        let args: Vec<_> = std::env::args_os().collect();
+        return std::env::current_exe()
+            .ok()
+            .is_some_and(|exe| is_post_update_launch_for(&exe, env_flag, &args));
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
 fn is_newer_version(remote: &str, current: &str) -> bool {
     let parse = |v: &str| -> Vec<u64> {
         v.split('.')
@@ -215,13 +273,7 @@ fn perform_update(info: &UpdateInfo, status: &Arc<Mutex<UpdateStatus>>) -> Resul
     download_with_progress(&info.download_url, &tmp_file, &report)?;
 
     *status.lock().unwrap() = UpdateStatus::Updating("正在替换程序文件...".into());
-    let old_path = exe_dir.join(format!(
-        "{}.old",
-        exe_path
-            .file_name()
-            .map(|f| f.to_string_lossy())
-            .unwrap_or_default()
-    ));
+    let old_path = old_executable_path(&exe_path);
     let _ = std::fs::remove_file(&old_path);
 
     // 运行中的 EXE 可以改名但不能删除：先让位，再落位新文件
@@ -235,7 +287,10 @@ fn perform_update(info: &UpdateInfo, status: &Arc<Mutex<UpdateStatus>>) -> Resul
     }
 
     *status.lock().unwrap() = UpdateStatus::Updating("正在启动新版本...".into());
-    Command::new(&exe_path)
+    let mut relaunch = Command::new(&exe_path);
+    relaunch.env(POST_UPDATE_ENV, "1");
+    configure_relaunch(&mut relaunch, std::process::id());
+    relaunch
         .spawn()
         .map_err(|e| format!("启动新版本失败: {e}"))?;
     std::process::exit(0);
@@ -342,9 +397,7 @@ pub fn cleanup_stale_updater_script() {
             }
             let _ = std::fs::remove_file(exe_dir.join("agentpad_update.tmp"));
             let _ = std::fs::remove_file(exe_dir.join("agentpad_update.new"));
-            if let Some(name) = exe_path.file_name() {
-                let _ = std::fs::remove_file(exe_dir.join(format!("{}.old", name.to_string_lossy())));
-            }
+            let _ = std::fs::remove_file(old_executable_path(&exe_path));
         }
     }
     #[cfg(target_os = "macos")]
@@ -383,5 +436,39 @@ mod tests {
     fn progress_message_formats() {
         assert_eq!(download_progress_msg(50, 200), "正在下载更新... 25%");
         assert!(download_progress_msg(1, 0).starts_with("正在下载更新..."));
+    }
+
+    #[test]
+    fn detects_post_update_from_flag_env_or_old_executable() {
+        let dir = std::env::temp_dir().join(format!("agentpad-relaunch-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("agentpad.exe");
+        let old = old_executable_path(&exe);
+        let no_args = vec![std::ffi::OsString::from("agentpad.exe")];
+        let update_args = vec![
+            std::ffi::OsString::from("agentpad.exe"),
+            std::ffi::OsString::from(AFTER_UPDATE_FLAG),
+            std::ffi::OsString::from("123"),
+        ];
+        assert_eq!(old, dir.join("agentpad.exe.old"));
+        assert_eq!(after_update_parent_pid(&update_args), Some(123));
+        assert_eq!(after_update_parent_pid(&no_args), None);
+        assert!(!is_post_update_launch_for(&exe, false, &no_args));
+        assert!(is_post_update_launch_for(&exe, false, &update_args));
+        assert!(is_post_update_launch_for(&exe, true, &no_args));
+        std::fs::write(&old, b"old").unwrap();
+        assert!(is_post_update_launch_for(&exe, false, &no_args));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn relaunch_command_contains_parent_pid() {
+        let mut command = Command::new("agentpad.exe");
+        configure_relaunch(&mut command, 456);
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(args, [AFTER_UPDATE_FLAG, "456"]);
     }
 }

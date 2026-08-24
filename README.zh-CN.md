@@ -153,20 +153,27 @@ Agent 是最佳用例；浏览器查资料、聊天框回消息，以及大多�
 
 #### macOS 首次打开指南
 
-当前 macOS 构建采用 ad-hoc 代码签名分发，首次双击启动可能被 Gatekeeper 拦截（提示应用已损坏或来自未识别的开发者）。处理步骤，**无需关闭 Gatekeeper**：
+**如果首次打开时被 macOS 拦截，请任选下面一种方式。**
+**请先确认 AgentPad 来自本项目官方 GitHub Release，并已放入「应用程序」文件夹。**
 
-1. 首次双击被拦截后，进入「系统设置 → 隐私与安全性 → 安全性」；
-2. 在拦截提示处点击「仍要打开」（Open Anyway）；
-3. 输入密码或使用 Touch ID 确认；
-4. 之后每次均可正常打开，无需重复此流程。
+##### 终端执行命令
 
-CLI 可选替代方案（仅限已确认从本项目官方 GitHub Release 下载构建的情况）：
+打开「终端」，复制并执行：
 
 ```bash
-xattr -dr com.apple.quarantine /path/to/AgentPad.app
+xattr -dr com.apple.quarantine /Applications/AgentPad.app
 ```
 
-> 无需关闭 Gatekeeper；不建议使用 `spctl --master-disable`（它会全局禁用系统验证）。
+执行后重新打开 AgentPad。
+
+##### 图形界面操作
+
+1. 进入「系统设置 → 隐私与安全性 → 安全性」；
+2. 在 AgentPad 的拦截提示处点击「仍要打开」（Open Anyway）；
+3. 输入密码或使用 Touch ID 确认；
+4. 返回「应用程序」文件夹，再次打开 AgentPad。
+
+> 无需关闭 Gatekeeper 且不建议使用 `spctl --master-disable` 降低安全性。
 
 ---
 

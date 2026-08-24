@@ -1937,17 +1937,61 @@ class _HomePageState extends State<HomePage> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(
-                '版本 $appVersion',
-                style: TextStyle(
-                  color: _controlForeground(Theme.of(ctx).brightness).withValues(alpha: 0.6),
-                  fontSize: 13,
+              InkWell(
+                key: const ValueKey('settings-version'),
+                borderRadius: BorderRadius.circular(8),
+                onTap: checkingUpdate
+                    ? null
+                    : () => _handleUpdateTap(
+                        refresh: () {
+                          if (ctx.mounted) setSheet(() {});
+                        },
+                      ),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Text(
+                    '版本 $appVersion',
+                    style: TextStyle(
+                      color: _controlForeground(Theme.of(ctx).brightness)
+                          .withValues(alpha: 0.6),
+                      fontSize: 13,
+                    ),
+                  ),
                 ),
               ),
               TextButton.icon(
-                onPressed: _checkAndroidUpdate,
-                icon: const Icon(Icons.refresh, size: 16),
-                label: const Text('检查更新'),
+                key: const ValueKey('settings-update-action'),
+                onPressed: checkingUpdate
+                    ? null
+                    : () => _handleUpdateTap(
+                        refresh: () {
+                          if (ctx.mounted) setSheet(() {});
+                        },
+                      ),
+                icon: checkingUpdate
+                    ? const SizedBox.square(
+                        dimension: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : Icon(
+                        pendingUpdateTag == null
+                            ? Icons.refresh
+                            : Icons.circle,
+                        size: pendingUpdateTag == null ? 16 : 7,
+                        color: pendingUpdateTag == null
+                            ? null
+                            : const Color(0xFF74B580),
+                      ),
+                label: Text(
+                  checkingUpdate
+                      ? '检查中...'
+                      : pendingUpdateTag == null
+                      ? '检查更新'
+                      : '可更新',
+                  style: pendingUpdateTag == null
+                      ? null
+                      : const TextStyle(color: Color(0xFF74B580)),
+                ),
               ),
             ],
           ),
@@ -2012,12 +2056,29 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-  Future<void> _checkAndroidUpdate({bool notify = true}) async {
+  void _refreshUpdateViews(VoidCallback? refresh) {
+    if (mounted) setState(() {});
+    refresh?.call();
+  }
+
+  void _handleUpdateTap({VoidCallback? refresh}) {
+    if (pendingUpdateTag != null) {
+      _showUpdateDialog();
+      return;
+    }
+    unawaited(_checkAndroidUpdate(refresh: refresh));
+  }
+
+  Future<void> _checkAndroidUpdate({
+    bool notify = true,
+    VoidCallback? refresh,
+  }) async {
     if (checkingUpdate) {
       if (notify) _showUpdateNotice('正在检查更新...');
       return;
     }
     checkingUpdate = true;
+    _refreshUpdateViews(refresh);
     if (notify) _showUpdateNotice('正在检查更新...');
 
     HttpClient? client;
@@ -2063,9 +2124,16 @@ class _HomePageState extends State<HomePage> {
           pendingUpdateBody = body;
           pendingUpdateApkUrl = apkUrl;
         });
+        refresh?.call();
         if (notify) _showUpdateNotice('发现新版本 v$tagName');
-      } else if (mounted && notify) {
-        _showUpdateNotice('当前已是最新版本 (v$currentVer)');
+      } else if (mounted) {
+        setState(() {
+          pendingUpdateTag = null;
+          pendingUpdateBody = null;
+          pendingUpdateApkUrl = null;
+        });
+        refresh?.call();
+        if (notify) _showUpdateNotice('当前已是最新版本 (v$currentVer)');
       }
     } catch (e) {
       if (mounted && notify) {
@@ -2074,6 +2142,7 @@ class _HomePageState extends State<HomePage> {
     } finally {
       client?.close(force: true);
       checkingUpdate = false;
+      _refreshUpdateViews(refresh);
     }
   }
 
@@ -2109,39 +2178,67 @@ class _HomePageState extends State<HomePage> {
   Widget _updateFooter() {
     final brightness = Theme.of(context).brightness;
     const updateGreen = Color(0xFF74B580);
+    final available = pendingUpdateTag != null;
     return Padding(
-      key: const ValueKey('update-footer'),
       padding: const EdgeInsets.fromLTRB(_pageGutter, 0, _pageGutter, 8),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Text(
-            '版本 $appVersion',
-            style: TextStyle(
-              color: _controlForeground(brightness).withValues(alpha: 0.6),
-              fontSize: 12,
+      child: Semantics(
+        button: true,
+        label: checkingUpdate
+            ? '正在检查更新'
+            : available
+            ? '发现新版本'
+            : '检查更新',
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            key: const ValueKey('update-footer'),
+            borderRadius: BorderRadius.circular(8),
+            onTap: checkingUpdate ? null : () => _handleUpdateTap(),
+            child: SizedBox(
+              height: 24,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(
+                    '版本 $appVersion',
+                    style: TextStyle(
+                      color: _controlForeground(brightness)
+                          .withValues(alpha: 0.6),
+                      fontSize: 12,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  if (checkingUpdate)
+                    const SizedBox.square(
+                      dimension: 11,
+                      child: CircularProgressIndicator(strokeWidth: 1.5),
+                    )
+                  else if (available) ...[
+                    Container(
+                      width: 6,
+                      height: 6,
+                      decoration: const BoxDecoration(
+                        color: updateGreen,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    const Text(
+                      '可更新',
+                      style: TextStyle(color: updateGreen, fontSize: 12),
+                    ),
+                  ] else
+                    Icon(
+                      Icons.refresh,
+                      size: 13,
+                      color: _controlForeground(brightness)
+                          .withValues(alpha: 0.45),
+                    ),
+                ],
+              ),
             ),
           ),
-          if (pendingUpdateTag != null) ...[
-            const SizedBox(width: 6),
-            Container(
-              width: 6,
-              height: 6,
-              decoration: const BoxDecoration(
-                color: updateGreen,
-                shape: BoxShape.circle,
-              ),
-            ),
-            const SizedBox(width: 4),
-            GestureDetector(
-              onTap: _showUpdateDialog,
-              child: const Text(
-                '可更新',
-                style: TextStyle(color: updateGreen, fontSize: 12),
-              ),
-            ),
-          ],
-        ],
+        ),
       ),
     );
   }

@@ -113,6 +113,7 @@ jobs:
       AGENTPAD_VERSION: ${{ needs.prepare-version.outputs.version }}
       MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
       MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      MACOS_CERTIFICATE_IDENTITY: ${{ secrets.MACOS_CERTIFICATE_IDENTITY }}
       APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
       APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
       APPLE_API_PRIVATE_KEY_BASE64: ${{ secrets.APPLE_API_PRIVATE_KEY_BASE64 }}
@@ -125,8 +126,8 @@ jobs:
         with:
           targets: aarch64-apple-darwin
 
-      - name: Import Developer ID certificate
-        if: ${{ env.MACOS_CERTIFICATE_P12_BASE64 != '' && env.MACOS_CERTIFICATE_PASSWORD != '' }}
+      - name: Import macOS signing certificate
+        if: ${{ env.MACOS_CERTIFICATE_P12_BASE64 != '' && env.MACOS_CERTIFICATE_PASSWORD != '' && env.MACOS_CERTIFICATE_IDENTITY != '' }}
         id: signing
         shell: bash
         run: |
@@ -140,9 +141,14 @@ jobs:
           security import "$certificate_path" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
           security list-keychains -d user -s "$keychain_path"
-          identity="$(security find-identity -v -p codesigning "$keychain_path" | awk -F '"' '/Developer ID Application/ { print $2; exit }')"
-          test -n "$identity" || { echo "Developer ID Application identity not found"; exit 1; }
+          identity="$MACOS_CERTIFICATE_IDENTITY"
+          security find-certificate -c "$identity" "$keychain_path" >/dev/null
+          developer_id=false
+          if [[ "$identity" == "Developer ID Application:"* ]]; then
+            developer_id=true
+          fi
           echo "identity=$identity" >> "$GITHUB_OUTPUT"
+          echo "developer_id=$developer_id" >> "$GITHUB_OUTPUT"
 
       - name: Test desktop application
         run: cargo test --manifest-path desktop/Cargo.toml -p agentpad
@@ -151,6 +157,7 @@ jobs:
         shell: bash
         env:
           SIGNING_IDENTITY: ${{ steps.signing.outputs.identity }}
+          DEVELOPER_ID: ${{ steps.signing.outputs.developer_id }}
         run: |
           cargo build --manifest-path desktop/Cargo.toml -p agentpad --release --target aarch64-apple-darwin
           app="desktop/target/aarch64-apple-darwin/release/AgentPad.app"
@@ -161,20 +168,25 @@ jobs:
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $AGENTPAD_VERSION" "$app/Contents/Info.plist"
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GITHUB_RUN_NUMBER" "$app/Contents/Info.plist"
           if [ -n "$SIGNING_IDENTITY" ]; then
-            codesign --force --deep --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$app"
+            if [ "$DEVELOPER_ID" = "true" ]; then
+              codesign --force --deep --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$app"
+            else
+              echo "Using stable self-signed identity for Accessibility continuity"
+              codesign --force --deep --sign "$SIGNING_IDENTITY" --identifier app.agentpad "$app"
+            fi
           else
-            echo "Developer ID secret not configured; using ad-hoc signature"
+            echo "macOS signing secret not configured; using ad-hoc signature"
             codesign --force --deep --sign - --identifier app.agentpad "$app"
           fi
           codesign --verify --deep --strict --verbose=2 "$app"
           ditto -c -k --sequesterRsrc --keepParent "$app" agentpad-macos-arm64.zip
           hdiutil create -volname "AgentPad" -srcfolder "$app" -ov -format UDZO agentpad-macos-arm64.dmg
-          if [ -n "$SIGNING_IDENTITY" ]; then
+          if [ "$DEVELOPER_ID" = "true" ]; then
             codesign --force --timestamp --sign "$SIGNING_IDENTITY" agentpad-macos-arm64.dmg
           fi
 
       - name: Notarize and package macOS artifacts
-        if: ${{ steps.signing.outputs.identity != '' && env.APPLE_API_KEY_ID != '' && env.APPLE_API_ISSUER_ID != '' && env.APPLE_API_PRIVATE_KEY_BASE64 != '' }}
+        if: ${{ steps.signing.outputs.developer_id == 'true' && env.APPLE_API_KEY_ID != '' && env.APPLE_API_ISSUER_ID != '' && env.APPLE_API_PRIVATE_KEY_BASE64 != '' }}
         shell: bash
         env:
           SIGNING_IDENTITY: ${{ steps.signing.outputs.identity }}

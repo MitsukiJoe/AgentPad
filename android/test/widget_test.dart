@@ -1419,4 +1419,53 @@ void main() {
     expect(tester.getSize(pointerPane).width, tester.getSize(inputPane).width);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('home and settings open the same available update dialog', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    final store = PadStore();
+    await store.load();
+    await tester.pumpWidget(AgentPadApp(store: store));
+    await tester.pump();
+
+    final dynamic home = tester.state(find.byType(HomePage));
+    home.setState(() {
+      home.checkingUpdate = false;
+      home.pendingUpdateTag = null;
+      home.pendingUpdateBody = null;
+      home.pendingUpdateApkUrl = null;
+    });
+    await tester.pump();
+    final idleFooter = tester.widget<InkWell>(
+      find.byKey(const ValueKey('update-footer')),
+    );
+    expect(idleFooter.onTap, isNotNull);
+
+    home.setState(() {
+      home.pendingUpdateTag = '9.9.9';
+      home.pendingUpdateBody = 'release notes';
+      home.pendingUpdateApkUrl = 'https://example.com/agentpad.apk';
+    });
+    await tester.pump();
+
+    await tester.tap(find.byKey(const ValueKey('update-footer')));
+    await tester.pumpAndSettle();
+    expect(find.text('发现新版本 v9.9.9'), findsOneWidget);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('设置'));
+    await tester.pumpAndSettle();
+    final action = find.byKey(const ValueKey('settings-update-action'));
+    expect(action, findsOneWidget);
+    expect(
+      find.descendant(of: action, matching: find.text('可更新')),
+      findsOneWidget,
+    );
+    await tester.ensureVisible(action);
+    await tester.tap(action);
+    await tester.pumpAndSettle();
+    expect(find.text('发现新版本 v9.9.9'), findsOneWidget);
+  });
 }

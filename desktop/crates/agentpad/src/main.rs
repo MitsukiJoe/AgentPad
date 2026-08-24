@@ -14,6 +14,7 @@ mod ws;
 use std::net::SocketAddr;
 
 fn main() -> eframe::Result {
+    let post_update = updater::is_post_update_launch();
     autostart::apply();
     updater::cleanup_stale_updater_script();
     let identity = identity::load();
@@ -28,7 +29,7 @@ fn main() -> eframe::Result {
     let rt = tokio::runtime::Runtime::new().expect("tokio");
     let state = ws::AppState::new(identity);
     let bind = SocketAddr::from(([0, 0, 0, 0], protocol::PORT));
-    match rt.block_on(ws::serve(state.clone(), bind)) {
+    match rt.block_on(ws::serve_with_retry(state.clone(), bind, post_update)) {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
             eprintln!("AgentPad is already running (port {})", protocol::PORT);
