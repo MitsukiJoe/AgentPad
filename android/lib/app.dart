@@ -397,6 +397,12 @@ class _HomePageState extends State<HomePage> {
     unawaited(h.sendSelected(keyMsg('Backspace', const [])));
   }
 
+  void _sendEmptyEnter() {
+    if (input.text.isNotEmpty) return;
+    voiceTimer?.cancel();
+    unawaited(hub?.sendSelected(keyMsg('Enter', const [])));
+  }
+
   void _updateVoiceCandidate(
     TextEditingValue value, {
     bool voiceEvidence = false,
@@ -741,36 +747,73 @@ class _HomePageState extends State<HomePage> {
                       'huge' => '输入框高度：高',
                       _ => '输入框高度：矮',
                     },
-                    child: OutlinedButton(
-                      key: const ValueKey('input-height'),
-                      style: OutlinedButton.styleFrom(
-                        padding: EdgeInsets.zero,
-                        side: BorderSide(color: accent),
-                        foregroundColor: _controlForeground(
-                          Theme.of(context).brightness,
+                    child: _PressScale(
+                      enabled: !store.reduceMotion,
+                      child: OutlinedButton(
+                        key: const ValueKey('input-height'),
+                        style: OutlinedButton.styleFrom(
+                          padding: EdgeInsets.zero,
+                          side: BorderSide(color: accent),
+                          foregroundColor: _controlForeground(
+                            Theme.of(context).brightness,
+                          ),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: sideRadius,
+                          ),
                         ),
-                        shape: RoundedRectangleBorder(borderRadius: sideRadius),
+                        onPressed: _cycleInputHeight,
+                        child: const Icon(Icons.open_in_full, size: 18),
                       ),
-                      onPressed: _cycleInputHeight,
-                      child: const Icon(Icons.open_in_full, size: 18),
                     ),
                   ),
                 ),
                 const SizedBox(height: sideGap),
                 Expanded(
-                  child: Tooltip(
-                    message: '发送',
-                    child: FilledButton(
-                      key: const ValueKey('send-button'),
-                      style: FilledButton.styleFrom(
-                        padding: EdgeInsets.zero,
-                        backgroundColor: accent,
-                        foregroundColor: _onAccentColor,
-                        shape: RoundedRectangleBorder(borderRadius: sideRadius),
-                      ),
-                      onPressed: () => _sendText('submit'),
-                      child: const Icon(Icons.send_rounded, size: 20),
-                    ),
+                  // Same empty-box test as _handleInputBackspace: no draft
+                  // text means the button is a plain Enter key on the PC.
+                  child: ValueListenableBuilder<TextEditingValue>(
+                    valueListenable: input,
+                    builder: (context, value, _) {
+                      final empty = value.text.isEmpty;
+                      return Tooltip(
+                        message: empty ? '回车' : '发送',
+                        child: FilledButton(
+                          key: const ValueKey('send-button'),
+                          style: FilledButton.styleFrom(
+                            padding: EdgeInsets.zero,
+                            backgroundColor: accent,
+                            foregroundColor: _onAccentColor,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: sideRadius,
+                            ),
+                          ),
+                          onPressed: empty
+                              ? _sendEmptyEnter
+                              : () => _sendText('submit'),
+                          child: AnimatedSwitcher(
+                            duration: store.reduceMotion
+                                ? Duration.zero
+                                : const Duration(milliseconds: 180),
+                            switchInCurve: Curves.easeOutBack,
+                            switchOutCurve: Curves.easeIn,
+                            transitionBuilder: (child, anim) => ScaleTransition(
+                              scale: anim,
+                              child: FadeTransition(
+                                opacity: anim,
+                                child: child,
+                              ),
+                            ),
+                            child: Icon(
+                              empty
+                                  ? Icons.keyboard_return
+                                  : Icons.send_rounded,
+                              key: ValueKey(empty),
+                              size: 20,
+                            ),
+                          ),
+                        ),
+                      );
+                    },
                   ),
                 ),
               ],
@@ -1813,19 +1856,18 @@ class _HomePageState extends State<HomePage> {
   Widget _flatWheel(bool dark) {
     final brightness = dark ? Brightness.dark : Brightness.light;
     return _ClaimParentScroll(
-      child: Listener(
-        onPointerMove: (e) {
-          if (e.down) _scrollWheel(e.localDelta.dy);
-        },
-        child: Container(
-          key: const ValueKey('touchpad-wheel'),
-          width: 44,
-          height: double.infinity,
-          decoration: BoxDecoration(
-            color: _controlBackground(brightness),
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: _controlBorder(brightness)),
-          ),
+      child: Container(
+        key: const ValueKey('touchpad-wheel'),
+        width: 44,
+        height: double.infinity,
+        decoration: BoxDecoration(
+          color: _controlBackground(brightness),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: _controlBorder(brightness)),
+        ),
+        child: _WheelNub(
+          enabled: !store.reduceMotion,
+          onScroll: _scrollWheel,
           child: Icon(
             Icons.swap_vert,
             size: 20,
@@ -2230,6 +2272,26 @@ class _HomePageState extends State<HomePage> {
                     onChanged: (v) async {
                       store.forceLandscape = v;
                       await _persist(layout: true);
+                      setSheet(() {});
+                    },
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 24),
+            Row(
+              children: [
+                const Expanded(child: Text('减弱动画效果')),
+                Transform.scale(
+                  scale: 0.78,
+                  alignment: Alignment.centerRight,
+                  child: Switch(
+                    key: const ValueKey('reduce-motion'),
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    value: store.reduceMotion,
+                    onChanged: (v) async {
+                      store.reduceMotion = v;
+                      await _persist();
                       setSheet(() {});
                     },
                   ),
@@ -3445,6 +3507,105 @@ class _ClaimParentScroll extends StatelessWidget {
             ),
       },
       child: child,
+    );
+  }
+}
+
+/// Scroll-strip glyph: rides the finger on Y while pressed, springs back
+/// (with overshoot) on release. Scroll deltas are forwarded regardless.
+class _WheelNub extends StatefulWidget {
+  const _WheelNub({
+    required this.enabled,
+    required this.onScroll,
+    required this.child,
+  });
+
+  final bool enabled;
+  final ValueChanged<double> onScroll;
+  final Widget child;
+
+  @override
+  State<_WheelNub> createState() => _WheelNubState();
+}
+
+class _WheelNubState extends State<_WheelNub> {
+  var dy = 0.0;
+  var dragging = false;
+
+  void _release() {
+    if (dy == 0 && !dragging) return;
+    setState(() {
+      dragging = false;
+      dy = 0;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, box) {
+        final limit = (box.maxHeight / 2 - 14).clamp(0.0, double.infinity);
+        return Listener(
+          behavior: HitTestBehavior.opaque,
+          onPointerDown: (_) => setState(() => dragging = true),
+          onPointerMove: (e) {
+            if (!e.down) return;
+            widget.onScroll(e.localDelta.dy);
+            if (!widget.enabled) return;
+            setState(() => dy = (dy + e.localDelta.dy).clamp(-limit, limit));
+          },
+          onPointerUp: (_) => _release(),
+          onPointerCancel: (_) => _release(),
+          child: Center(
+            child: AnimatedContainer(
+              duration: dragging || !widget.enabled
+                  ? Duration.zero
+                  : const Duration(milliseconds: 520),
+              curve: Curves.elasticOut,
+              transform: Matrix4.translationValues(0, dy, 0),
+              child: widget.child,
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Shrinks the child while a pointer is down and springs back on release.
+class _PressScale extends StatefulWidget {
+  const _PressScale({required this.enabled, required this.child});
+
+  final bool enabled;
+  final Widget child;
+
+  @override
+  State<_PressScale> createState() => _PressScaleState();
+}
+
+class _PressScaleState extends State<_PressScale> {
+  var pressed = false;
+
+  void _set(bool v) {
+    if (pressed != v) setState(() => pressed = v);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final down = pressed && widget.enabled;
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: (_) => _set(true),
+      onPointerUp: (_) => _set(false),
+      onPointerCancel: (_) => _set(false),
+      child: AnimatedScale(
+        scale: down ? 0.84 : 1,
+        duration: down
+            ? const Duration(milliseconds: 90)
+            : const Duration(milliseconds: 420),
+        curve: down ? Curves.easeOut : Curves.elasticOut,
+        child: widget.child,
+      ),
     );
   }
 }

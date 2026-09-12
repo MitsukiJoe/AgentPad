@@ -26,7 +26,21 @@ void main() {
     );
     expect(send.style?.backgroundColor?.resolve({}), const Color(0xFF5EAFF9));
     expect(send.style?.foregroundColor?.resolve({}), Colors.white);
+    // Empty draft: the send key is an Enter key; typing flips it to send.
+    expect(find.byTooltip('回车'), findsOneWidget);
+    expect(find.byIcon(Icons.send_rounded), findsNothing);
+    await tester.enterText(find.byKey(const ValueKey('text-input')), 'x');
+    await tester.pump();
+    expect(find.byTooltip('发送'), findsOneWidget);
+    // Icon swap is animated: both glyphs coexist mid-transition.
     expect(find.byIcon(Icons.send_rounded), findsOneWidget);
+    expect(find.byIcon(Icons.keyboard_return), findsNWidgets(3));
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.byIcon(Icons.keyboard_return), findsNWidgets(2));
+    await tester.enterText(find.byKey(const ValueKey('text-input')), '');
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.byIcon(Icons.send_rounded), findsNothing);
     expect(find.byIcon(Icons.open_in_full), findsOneWidget);
     final input = tester.widget<TextField>(
       find.byKey(const ValueKey('text-input')),
@@ -112,7 +126,10 @@ void main() {
     expect(find.text('Esc'), findsOneWidget);
     expect(find.text('Enter'), findsNothing);
     expect(find.text('Shift+Enter'), findsNothing);
+    // Box still holds the multi-line draft: only the two shortcut chips.
+    await tester.pump(const Duration(milliseconds: 200));
     expect(find.byIcon(Icons.keyboard_return), findsNWidgets(2));
+    expect(find.byIcon(Icons.send_rounded), findsOneWidget);
     expect(find.text('触控板'), findsOneWidget);
     expect(find.text('轨迹球'), findsOneWidget);
     expect(find.text('小红点'), findsOneWidget);
@@ -354,7 +371,7 @@ void main() {
         .getTopLeft(find.byKey(const ValueKey('shortcut-section')))
         .dy;
     expect(shortcutsTop, greaterThanOrEqualTo(pointerBottom));
-    expect(find.byIcon(Icons.keyboard_return), findsNWidgets(2));
+    expect(find.byIcon(Icons.keyboard_return), findsNWidgets(3));
     expect(find.byIcon(Icons.keyboard_capslock), findsOneWidget);
     expect(find.byTooltip('Enter'), findsOneWidget);
     expect(find.byTooltip('Shift+Enter'), findsOneWidget);
@@ -868,6 +885,65 @@ void main() {
     expect(wheel.right, sendButton.right);
     expect(modeLeft, greaterThanOrEqualTo(actionLeft));
   });
+
+  testWidgets(
+    'wheel glyph rides the finger, springs back, reduce-motion freezes it',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final store = PadStore();
+      await store.load();
+      expect(store.reduceMotion, isFalse);
+      await tester.pumpWidget(
+        AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+      );
+      await tester.pump();
+      final glyph = find.byIcon(Icons.swap_vert);
+      final rest = tester.getCenter(glyph).dy;
+      final wheelRect = tester.getRect(
+        find.byKey(const ValueKey('touchpad-wheel')),
+      );
+
+      var g = await tester.startGesture(wheelRect.center);
+      await g.moveBy(const Offset(0, 30));
+      await tester.pump();
+      expect(tester.getCenter(glyph).dy, rest + 30);
+      // Clamped inside the strip.
+      await g.moveBy(const Offset(0, 500));
+      await tester.pump();
+      expect(tester.getCenter(glyph).dy, lessThan(wheelRect.bottom));
+      await g.up();
+      await tester.pump();
+    await tester.pump(const Duration(milliseconds: 130));
+    // Quarter way through elasticOut: already past rest (overshoot).
+    expect(tester.getCenter(glyph).dy, lessThan(rest));
+    await tester.pump(const Duration(milliseconds: 500));
+      expect(tester.getCenter(glyph).dy, rest);
+
+      await tester.tap(find.byTooltip('设置'));
+      await tester.pumpAndSettle();
+      final toggle = find.byKey(const ValueKey('reduce-motion'));
+      await tester.scrollUntilVisible(
+        toggle,
+        200,
+        scrollable: find.descendant(
+          of: find.byKey(const ValueKey('settings-scroll')),
+          matching: find.byType(Scrollable),
+        ),
+      );
+      await tester.tap(toggle);
+      await tester.pumpAndSettle();
+      expect(store.reduceMotion, isTrue);
+      await tester.tap(find.byKey(const ValueKey('settings-close')));
+      await tester.pumpAndSettle();
+
+      g = await tester.startGesture(wheelRect.center);
+      await g.moveBy(const Offset(0, 30));
+      await tester.pump();
+      expect(tester.getCenter(glyph).dy, rest);
+      await g.up();
+      await tester.pump();
+    },
+  );
 
   testWidgets('touchpad and flat wheel share fixed neutral styling', (
     tester,
@@ -1727,6 +1803,16 @@ void main() {
       {'type': 'key', 'key': 'Backspace', 'modifiers': <dynamic>[]},
     ]);
 
+    // Same empty-box path: the send button is an Enter key, not a text send.
+    await tester.tap(find.byKey(const ValueKey('send-button')));
+    await tester.pump();
+    expect(sent.last, {
+      'type': 'key',
+      'key': 'Enter',
+      'modifiers': <dynamic>[],
+    });
+    sent.removeLast();
+
     tester.testTextInput.updateEditingValue(
       const TextEditingValue(
         text: 'a',
@@ -1745,8 +1831,10 @@ void main() {
     await tester.sendKeyEvent(LogicalKeyboardKey.backspace);
     await tester.pump();
     expect(
-      tester.widget<TextField>(find.byKey(const ValueKey('text-input')))
-          .controller!.text,
+      tester
+          .widget<TextField>(find.byKey(const ValueKey('text-input')))
+          .controller!
+          .text,
       isEmpty,
     );
     expect(sent.length, 1);

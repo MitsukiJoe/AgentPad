@@ -156,6 +156,7 @@ class PadStore {
   String landscapePointerSide = 'right';
   bool forceLandscape = false;
   bool longPressHaptic = true;
+  bool reduceMotion = false;
   String clientId = '';
   String theme = 'system';
   String themeColor = 'blue';
@@ -273,6 +274,7 @@ class PadStore {
     }
     forceLandscape = p.getBool('force_landscape') ?? false;
     longPressHaptic = p.getBool('long_press_haptic') ?? true;
+    reduceMotion = p.getBool('reduce_motion') ?? false;
     theme = p.getString('theme') ?? 'system';
     appIcon = p.getString('app_icon') ?? 'system';
     if (!{'white', 'black', 'system'}.contains(appIcon)) {
@@ -330,6 +332,7 @@ class PadStore {
     await p.setString('landscape_pointer_side', landscapePointerSide);
     await p.setBool('force_landscape', forceLandscape);
     await p.setBool('long_press_haptic', longPressHaptic);
+    await p.setBool('reduce_motion', reduceMotion);
     await p.setString('theme', theme);
     await p.setString('theme_color', themeColor);
     await p.setString('app_icon', appIcon);
