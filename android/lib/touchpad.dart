@@ -12,7 +12,7 @@ class TouchpadAction {
   final double dx;
   final double dy;
   final int buttons;
-  final int wheel;
+  final double wheel;
   final bool immediate;
 }
 
@@ -23,7 +23,6 @@ class TouchpadGesture {
   Offset? _last;
   Offset? _multiCenter;
   var _travel = 0.0;
-  var _wheel = 0.0;
   var _longPress = false;
   var _dragging = false;
   var _multi = false;
@@ -53,6 +52,8 @@ class TouchpadGesture {
       return false;
     }
     _longPress = true;
+    _start = _last;
+    _travel = 0;
     return true;
   }
 
@@ -68,15 +69,19 @@ class TouchpadGesture {
         : _travel;
     if (delta == Offset.zero) return const [];
 
-    final actions = <TouchpadAction>[];
-    if (_longPress && _travel > movementThreshold && !_dragging) {
+    if (_longPress && !_dragging) {
+      if (_travel <= movementThreshold) return const [];
       _dragging = true;
-      actions.add(const TouchpadAction(buttons: 1, immediate: true));
+      final drag = position - _start!;
+      return [
+        const TouchpadAction(buttons: 1, immediate: true),
+        TouchpadAction(dx: drag.dx, dy: drag.dy, buttons: 1),
+      ];
     }
-    actions.add(
+
+    return [
       TouchpadAction(dx: delta.dx, dy: delta.dy, buttons: _dragging ? 1 : 0),
-    );
-    return actions;
+    ];
   }
 
   List<TouchpadAction> up(int id, Offset position) {
@@ -98,7 +103,7 @@ class TouchpadGesture {
         ? (position - _start!).distance
         : _travel;
     final actions = _dragging
-        ? const [TouchpadAction(buttons: 0, immediate: true)]
+        ? <TouchpadAction>[const TouchpadAction(buttons: 0, immediate: true)]
         : _travel <= movementThreshold
         ? _click(_longPress ? 2 : 1)
         : const <TouchpadAction>[];
@@ -122,15 +127,9 @@ class TouchpadGesture {
     final delta = center - oldCenter;
     _multiCenter = center;
     _travel += delta.distance;
-    _wheel += delta.dy;
-    final actions = <TouchpadAction>[];
-    final wheel = _wheel.truncate();
-    if (wheel != 0) {
-      _wheel -= wheel;
-      _didScroll = true;
-      actions.add(TouchpadAction(wheel: wheel));
-    }
-    return actions;
+    if (delta.dy == 0) return const [];
+    _didScroll = true;
+    return [TouchpadAction(wheel: delta.dy)];
   }
 
   Offset get _center {
@@ -152,7 +151,6 @@ class TouchpadGesture {
     _last = null;
     _multiCenter = null;
     _travel = 0;
-    _wheel = 0;
     _longPress = false;
     _dragging = false;
     _multi = false;

@@ -106,22 +106,40 @@ fn enqueue_pointer(actions: Vec<handle::Action>) {
         let (tx, rx) = std::sync::mpsc::channel::<Vec<handle::Action>>();
         std::thread::Builder::new()
             .name("agentpad-inject".into())
-            .spawn(move || {
-                while let Ok(mut batch) = rx.recv() {
-                    while let Ok(more) = rx.try_recv() {
-                        merge_pointer_batch(&mut batch, more);
-                    }
-                    handle::apply_actions(&batch);
-                }
-            })
+            .spawn(move || run_pointer_queue(rx, handle::apply_actions))
             .expect("inject thread");
         tx
     });
     let _ = tx.send(actions);
 }
 
-fn merge_pointer_batch(dst: &mut Vec<handle::Action>, more: Vec<handle::Action>) {
+fn run_pointer_queue(
+    rx: std::sync::mpsc::Receiver<Vec<handle::Action>>,
+    mut apply: impl FnMut(&[handle::Action]),
+) {
+    let mut buttons_before_batch = 0;
+    while let Ok(mut batch) = rx.recv() {
+        while let Ok(more) = rx.try_recv() {
+            merge_pointer_batch(&mut batch, more, buttons_before_batch);
+        }
+        apply(&batch);
+        if let Some(handle::Action::Pointer { buttons, .. }) = batch.last() {
+            buttons_before_batch = *buttons;
+        }
+    }
+}
+
+fn merge_pointer_batch(
+    dst: &mut Vec<handle::Action>,
+    more: Vec<handle::Action>,
+    buttons_before_batch: u8,
+) {
     for action in more {
+        let buttons_before_tail = match &dst[..] {
+            [.., handle::Action::Pointer { buttons, .. }, _] => Some(*buttons),
+            [_] => Some(buttons_before_batch),
+            _ => None,
+        };
         match (&mut dst[..], action) {
             (
                 [.., handle::Action::Pointer {
@@ -136,10 +154,9 @@ fn merge_pointer_batch(dst: &mut Vec<handle::Action>, more: Vec<handle::Action>)
                     buttons: btn,
                     wheel: wh,
                 },
-            // Clicks are button edges across packets (1 then 0). Overwriting
-            // buttons while coalescing motion drops the press entirely — and
-            // Windows inject is slower, so backlog merges hit clicks more often.
-            ) if *buttons == btn => {
+                // Native injection moves before changing buttons, so an edge packet
+                // must not absorb motion or wheel input that happened after the edge.
+            ) if *buttons == btn && buttons_before_tail == Some(btn) => {
                 *dx += ddx;
                 *dy += ddy;
                 *wheel += wh;
@@ -232,6 +249,7 @@ mod tests {
                 buttons: 0,
                 wheel: 4,
             }],
+            0,
         );
         assert_eq!(
             batch,
@@ -260,6 +278,7 @@ mod tests {
                 buttons: 0,
                 wheel: 0,
             }],
+            0,
         );
         assert_eq!(
             batch,
@@ -278,6 +297,93 @@ mod tests {
                 },
             ]
         );
+    }
+
+    fn pointer(dx: f64, buttons: u8, wheel: i32) -> handle::Action {
+        handle::Action::Pointer {
+            dx,
+            dy: 0.0,
+            buttons,
+            wheel,
+        }
+    }
+
+    #[test]
+    fn keeps_drag_start_before_backlogged_motion() {
+        let mut batch = vec![pointer(0.0, 1, 0)];
+        merge_pointer_batch(&mut batch, vec![pointer(4.0, 1, 0)], 0);
+        assert_eq!(batch, vec![pointer(0.0, 1, 0), pointer(4.0, 1, 0)]);
+    }
+
+    #[test]
+    fn keeps_release_before_backlogged_hover() {
+        let mut batch = vec![pointer(0.0, 1, 0), pointer(0.0, 0, 0)];
+        merge_pointer_batch(&mut batch, vec![pointer(4.0, 0, 0)], 0);
+        assert_eq!(
+            batch,
+            vec![pointer(0.0, 1, 0), pointer(0.0, 0, 0), pointer(4.0, 0, 0)]
+        );
+    }
+
+    #[test]
+    fn keeps_wheel_after_backlogged_button_edge() {
+        let mut batch = vec![pointer(0.0, 1, 0)];
+        merge_pointer_batch(&mut batch, vec![pointer(0.0, 1, 3)], 0);
+        assert_eq!(batch, vec![pointer(0.0, 1, 0), pointer(0.0, 1, 3)]);
+    }
+
+    #[test]
+    fn still_merges_backlogged_drag_after_button_edge() {
+        let mut batch = vec![pointer(0.0, 1, 0), pointer(1.0, 1, 1)];
+        merge_pointer_batch(&mut batch, vec![pointer(2.0, 1, 2), pointer(3.0, 1, 3)], 0);
+        assert_eq!(batch, vec![pointer(0.0, 1, 0), pointer(6.0, 1, 6)]);
+    }
+
+    #[test]
+    fn keeps_release_edge_at_start_of_next_batch() {
+        let mut batch = vec![pointer(0.0, 0, 0)];
+        merge_pointer_batch(&mut batch, vec![pointer(4.0, 0, 0)], 1);
+        assert_eq!(batch, vec![pointer(0.0, 0, 0), pointer(4.0, 0, 0)]);
+    }
+
+    #[test]
+    fn merges_held_drag_across_batches() {
+        let mut batch = vec![pointer(1.0, 1, 1)];
+        merge_pointer_batch(&mut batch, vec![pointer(2.0, 1, 2)], 1);
+        assert_eq!(batch, vec![pointer(3.0, 1, 3)]);
+    }
+
+    #[test]
+    fn pointer_worker_keeps_edges_after_stalled_injection() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (observed_tx, observed_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut first = true;
+            run_pointer_queue(rx, |batch| {
+                observed_tx.send(batch.to_vec()).unwrap();
+                if first {
+                    first = false;
+                    resume_rx.recv().unwrap();
+                }
+            });
+        });
+        let timeout = std::time::Duration::from_secs(5);
+        tx.send(vec![pointer(0.0, 1, 0)]).unwrap();
+        assert_eq!(
+            observed_rx.recv_timeout(timeout).unwrap(),
+            vec![pointer(0.0, 1, 0)]
+        );
+        tx.send(vec![pointer(0.0, 0, 0)]).unwrap();
+        tx.send(vec![pointer(4.0, 0, 1)]).unwrap();
+        tx.send(vec![pointer(2.0, 0, 2)]).unwrap();
+        drop(tx);
+        resume_tx.send(()).unwrap();
+        assert_eq!(
+            observed_rx.recv_timeout(timeout).unwrap(),
+            vec![pointer(0.0, 0, 0), pointer(6.0, 0, 3)]
+        );
+        worker.join().unwrap();
     }
 
     #[tokio::test]

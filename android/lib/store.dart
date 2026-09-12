@@ -11,6 +11,7 @@ class Device {
     required this.name,
     required this.ips,
     required this.port,
+    this.os = '',
     this.selected = true,
   });
 
@@ -18,6 +19,7 @@ class Device {
   String name;
   List<String> ips;
   int port;
+  String os;
   bool selected;
 
   Map<String, dynamic> toJson() => {
@@ -25,6 +27,7 @@ class Device {
     'name': name,
     'ips': ips,
     'port': port,
+    'os': os,
     'selected': selected,
   };
 
@@ -36,6 +39,7 @@ class Device {
         for (final e in j['ips'] as List) e.toString(),
     ],
     port: (j['port'] as num?)?.toInt() ?? kPort,
+    os: j['os'] as String? ?? '',
     selected: j['selected'] as bool? ?? true,
   );
 
@@ -50,6 +54,7 @@ class Device {
       name: name.isNotEmpty ? name : other.name,
       ips: union,
       port: other.port,
+      os: other.os.isNotEmpty ? other.os : os,
       selected: selected,
     );
   }
@@ -130,19 +135,27 @@ class PadStore {
   List<Shortcut> shortcuts = defaultShortcuts();
   bool autoEnter = false;
   bool voiceAutoSend = true;
+
   /// After connect, merge all LAN IPs from the PC into this device (off by default).
   bool collectAllIps = false;
   int voiceDelayMs = 500;
   String pointerMode = 'trackpad';
   bool homePointerQuickSwitch = true;
+  String deviceStripPlacement = 'input';
   String wheelSide = 'right';
+  bool wheelReverseWindows = false;
+  bool wheelReverseMac = false;
   String pointerSize = 'medium';
   int pointerHz = 60;
   var pointerHzManual = false;
-  double pointerSpeed = 2;
-  double wheelSpeed = 16;
+  double pointerSpeedWindows = 3;
+  double pointerSpeedMac = 3;
+  double wheelSpeedWindows = 1;
+  double wheelSpeedMac = 16;
   String inputHeight = 'medium';
-  String landscapePointerSide = 'left';
+  String landscapePointerSide = 'right';
+  bool forceLandscape = false;
+  bool longPressHaptic = true;
   String clientId = '';
   String theme = 'system';
   String themeColor = 'blue';
@@ -150,9 +163,21 @@ class PadStore {
 
   Duration get voiceDelay => Duration(milliseconds: voiceDelayMs);
 
-  static const pointerGears = [1.0, 2.0, 3.0, 4.0];
+  static const pointerGears = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
+  static const wheelGearsWindows = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
   // Actual scroll multipliers (includes the stronger wheel base vs pointer).
   static const wheelGears = [4.0, 8.0, 12.0, 16.0, 20.0, 24.0, 28.0];
+
+  double pointerSpeedFor(String os) =>
+      _isWindows(os) ? pointerSpeedWindows : pointerSpeedMac;
+
+  double wheelSpeedFor(String os) =>
+      _isWindows(os) ? wheelSpeedWindows : wheelSpeedMac;
+
+  bool wheelReverseFor(String os) =>
+      _isWindows(os) ? wheelReverseWindows : wheelReverseMac;
+
+  static bool _isWindows(String os) => os.toLowerCase().startsWith('windows');
 
   static double coerceGear(double raw, List<double> gears, double fallback) {
     for (final g in gears) {
@@ -194,8 +219,14 @@ class PadStore {
       pointerMode = 'trackpad';
     }
     homePointerQuickSwitch = p.getBool('home_pointer_quick_switch') ?? true;
+    deviceStripPlacement = p.getString('device_strip_placement') ?? 'input';
+    if (!{'input', 'top'}.contains(deviceStripPlacement)) {
+      deviceStripPlacement = 'input';
+    }
     wheelSide = p.getString('wheel_side') ?? 'right';
     if (!{'left', 'right'}.contains(wheelSide)) wheelSide = 'right';
+    wheelReverseWindows = p.getBool('wheel_reverse_windows') ?? false;
+    wheelReverseMac = p.getBool('wheel_reverse_mac') ?? false;
     pointerSize = p.getString('pointer_size') ?? 'medium';
     if (!{'small', 'medium', 'large'}.contains(pointerSize)) {
       pointerSize = 'medium';
@@ -204,29 +235,44 @@ class PadStore {
     pointerHz = p.getInt('pointer_hz') ?? 60;
     if (!{60, 120, 240}.contains(pointerHz)) pointerHz = 60;
     if (!pointerHzManual && pointerHz == 240) pointerHz = 60;
-    pointerSpeed = coerceGear(
-      (p.getDouble('pointer_speed') ?? 2).roundToDouble(),
+    final legacyPointerSpeed = p.getDouble('pointer_speed');
+    pointerSpeedWindows = coerceGear(
+      (p.getDouble('pointer_speed_windows') ?? legacyPointerSpeed ?? 3)
+          .roundToDouble(),
       pointerGears,
-      2,
+      3,
     );
-    if (p.containsKey('wheel_factor')) {
-      wheelSpeed = nearestGear(p.getDouble('wheel_factor') ?? 16, wheelGears, 16);
-    } else {
-      final legacy = p.getDouble('wheel_speed');
-      // Old 1–9 gear index had a hidden ×4 gain.
-      wheelSpeed = legacy == null
-          ? 16
-          : nearestGear(legacy * 4, wheelGears, 16);
-    }
+    pointerSpeedMac = coerceGear(
+      (p.getDouble('pointer_speed_mac') ?? legacyPointerSpeed ?? 3)
+          .roundToDouble(),
+      pointerGears,
+      3,
+    );
+    final legacyWheel = p.getDouble('wheel_speed');
+    final legacyFactor = p.getDouble('wheel_factor');
+    wheelSpeedWindows = nearestGear(
+      p.getDouble('wheel_factor_windows') ?? 1,
+      wheelGearsWindows,
+      1,
+    );
+    wheelSpeedMac = nearestGear(
+      p.getDouble('wheel_factor_mac') ??
+          legacyFactor ??
+          (legacyWheel == null ? 16 : legacyWheel * 4),
+      wheelGears,
+      16,
+    );
     inputHeight = p.getString('input_height') ?? 'medium';
     if (inputHeight == 'short') inputHeight = 'medium';
     if (!{'medium', 'tall', 'huge'}.contains(inputHeight)) {
       inputHeight = 'medium';
     }
-    landscapePointerSide = p.getString('landscape_pointer_side') ?? 'left';
+    landscapePointerSide = p.getString('landscape_pointer_side') ?? 'right';
     if (!{'left', 'right'}.contains(landscapePointerSide)) {
-      landscapePointerSide = 'left';
+      landscapePointerSide = 'right';
     }
+    forceLandscape = p.getBool('force_landscape') ?? false;
+    longPressHaptic = p.getBool('long_press_haptic') ?? true;
     theme = p.getString('theme') ?? 'system';
     appIcon = p.getString('app_icon') ?? 'system';
     if (!{'white', 'black', 'system'}.contains(appIcon)) {
@@ -269,14 +315,21 @@ class PadStore {
     await p.setInt('voice_delay_ms', voiceDelayMs);
     await p.setString('pointer_mode', pointerMode);
     await p.setBool('home_pointer_quick_switch', homePointerQuickSwitch);
+    await p.setString('device_strip_placement', deviceStripPlacement);
     await p.setString('wheel_side', wheelSide);
+    await p.setBool('wheel_reverse_windows', wheelReverseWindows);
+    await p.setBool('wheel_reverse_mac', wheelReverseMac);
     await p.setString('pointer_size', pointerSize);
     await p.setInt('pointer_hz', pointerHz);
     await p.setBool('pointer_hz_manual', pointerHzManual);
-    await p.setDouble('pointer_speed', pointerSpeed);
-    await p.setDouble('wheel_factor', wheelSpeed);
+    await p.setDouble('pointer_speed_windows', pointerSpeedWindows);
+    await p.setDouble('pointer_speed_mac', pointerSpeedMac);
+    await p.setDouble('wheel_factor_windows', wheelSpeedWindows);
+    await p.setDouble('wheel_factor_mac', wheelSpeedMac);
     await p.setString('input_height', inputHeight);
     await p.setString('landscape_pointer_side', landscapePointerSide);
+    await p.setBool('force_landscape', forceLandscape);
+    await p.setBool('long_press_haptic', longPressHaptic);
     await p.setString('theme', theme);
     await p.setString('theme_color', themeColor);
     await p.setString('app_icon', appIcon);

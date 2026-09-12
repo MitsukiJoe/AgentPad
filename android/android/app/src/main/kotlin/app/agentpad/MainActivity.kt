@@ -8,15 +8,16 @@ import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
-import android.os.HandlerThread
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.view.MotionEvent
+import android.view.View
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.embedding.engine.renderer.FlutterUiDisplayListener
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -25,7 +26,6 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
-import org.json.JSONObject
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -38,25 +38,85 @@ import javax.net.SocketFactory
 
 class MainActivity : FlutterActivity() {
     private lateinit var voiceRecording: VoiceRecordingTracker
+    private var ws: WifiWs? = null
+    private var inputView: BackspaceFlutterView? = null
+    private var firstFrameRendered = false
+
+    override fun attachToEngineAutomatically() = false
 
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         super.onCreate(savedInstanceState)
+        inputView = BackspaceFlutterView(this) { ws?.emitInputBackspace() }.also { view ->
+            view.id = FLUTTER_VIEW_ID
+            view.addOnFirstFrameRenderedListener(object : FlutterUiDisplayListener {
+                override fun onFlutterUiDisplayed() {
+                    firstFrameRendered = true
+                    this@MainActivity.onFlutterUiDisplayed()
+                }
+
+                override fun onFlutterUiNoLongerDisplayed() {
+                    this@MainActivity.onFlutterUiNoLongerDisplayed()
+                }
+            })
+            setContentView(view)
+            view.attachToFlutterEngine(requireNotNull(flutterEngine))
+        }
         preferPeakRefreshRate()
+        window.decorView.post { preferPeakRefreshRate() }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        inputView?.visibility = View.VISIBLE
+    }
+
+    override fun onStop() {
+        inputView?.visibility = View.GONE
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        inputView?.detachFromFlutterEngine()
+        inputView = null
+        super.onDestroy()
+    }
+
+    override fun detachFromFlutterEngine() {
+        inputView?.detachFromFlutterEngine()
+        super.detachFromFlutterEngine()
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (inputView?.isAttachedToFlutterEngine == true &&
+            firstFrameRendered && level >= TRIM_MEMORY_RUNNING_LOW
+        ) {
+            flutterEngine?.dartExecutor?.notifyLowMemoryWarning()
+            flutterEngine?.systemChannel?.sendMemoryPressureWarning()
+        }
     }
 
     override fun onResume() {
         super.onResume()
         preferPeakRefreshRate()
+        window.decorView.post { preferPeakRefreshRate() }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) preferPeakRefreshRate()
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         preferPeakRefreshRate()
+        window.decorView.post { preferPeakRefreshRate() }
         voiceRecording = VoiceRecordingTracker(this).also { it.start() }
-        WifiWs(this, flutterEngine, voiceRecording)
+        ws = WifiWs(this, flutterEngine, voiceRecording)
     }
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        ws = null
         if (::voiceRecording.isInitialized) voiceRecording.stop()
         super.cleanUpFlutterEngine(flutterEngine)
     }
@@ -66,7 +126,7 @@ class MainActivity : FlutterActivity() {
         return super.dispatchTouchEvent(event)
     }
 
-    // Flutter often stays on 60Hz until the window asks for a higher mode.
+    // Flutter can stay at 60Hz unless both the window and its render surface ask for the peak mode.
     private fun preferPeakRefreshRate() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
         val display =
@@ -91,6 +151,27 @@ class MainActivity : FlutterActivity() {
         @Suppress("DEPRECATION")
         attrs.preferredRefreshRate = best.refreshRate
         window.attributes = attrs
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            requestFrameRate(window.decorView, best.refreshRate)
+        }
+    }
+
+    @android.annotation.TargetApi(Build.VERSION_CODES.R)
+    private fun requestFrameRate(view: android.view.View, hz: Float) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+            runCatching { view.requestedFrameRate = hz }
+        }
+        if (view is android.view.SurfaceView) {
+            val surface = view.holder.surface
+            if (surface.isValid) {
+                runCatching {
+                    surface.setFrameRate(hz, android.view.Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
+                }
+            }
+        }
+        if (view is android.view.ViewGroup) {
+            for (i in 0 until view.childCount) requestFrameRate(view.getChildAt(i), hz)
+        }
     }
 }
 
@@ -230,8 +311,8 @@ class WifiWs(
                     }
                     "close" -> {
                         val id = call.argument<String>("id") ?: ""
-                        sockets.remove(id)?.close(1000, null)
                         pointer.drop(id)
+                        sockets.remove(id)?.close(1000, null)
                         releaseWifiIfIdle()
                         result.success(true)
                     }
@@ -311,11 +392,16 @@ class WifiWs(
         events = null
     }
 
+    fun emitInputBackspace() {
+        main.post { events?.success(mapOf("event" to "inputBackspace")) }
+    }
+
     private fun emit(id: String, event: String) {
         main.post { events?.success(mapOf("id" to id, "event" to event)) }
     }
 
     private fun connect(id: String, host: String, port: Int, result: MethodChannel.Result) {
+        pointer.drop(id)
         sockets.remove(id)?.close(1000, null)
         val settled = AtomicBoolean()
         fun settle(ok: Boolean) {
@@ -478,84 +564,6 @@ class WifiWs(
             caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
                 caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
         }
-    }
-}
-
-private class PointerPump(
-    private val sockets: ConcurrentHashMap<String, WebSocket>,
-) : Runnable {
-    private val lock = Any()
-    private val dx = HashMap<String, Double>()
-    private val dy = HashMap<String, Double>()
-    private val buttons = HashMap<String, Int>()
-    private val wheel = HashMap<String, Int>()
-    private val pending = HashSet<String>()
-    private val thread = HandlerThread("agentpad-pointer").apply { start() }
-    private val handler = Handler(thread.looper)
-    private var draining = false
-
-    fun add(id: String, ddx: Double, ddy: Double, btn: Int, wh: Int, immediate: Boolean) {
-        var schedule = false
-        synchronized(lock) {
-            dx[id] = (dx[id] ?: 0.0) + ddx
-            dy[id] = (dy[id] ?: 0.0) + ddy
-            buttons[id] = btn
-            wheel[id] = (wheel[id] ?: 0) + wh
-            pending.add(id)
-            if (!draining) {
-                draining = true
-                schedule = true
-            }
-        }
-        // ponytail: immediate only forces a wake; coalescing still happens on the writer thread.
-        if (schedule || immediate) handler.post(this)
-    }
-
-    fun drop(id: String) {
-        synchronized(lock) {
-            pending.remove(id)
-            dx.remove(id)
-            dy.remove(id)
-            buttons.remove(id)
-            wheel.remove(id)
-        }
-    }
-
-    // Single-flight: coalesce only while the previous WebSocket write is busy.
-    override fun run() {
-        while (true) {
-            val batch = synchronized(lock) {
-                if (pending.isEmpty()) {
-                    draining = false
-                    return
-                }
-                val ids = pending.toList()
-                pending.clear()
-                ids.mapNotNull { id -> takeLocked(id)?.let { id to it } }
-            }
-            for (packet in batch) sockets[packet.first]?.send(packet.second)
-        }
-    }
-
-    private fun takeLocked(id: String): String? {
-        if (!dx.containsKey(id) &&
-            !dy.containsKey(id) &&
-            !buttons.containsKey(id) &&
-            !wheel.containsKey(id)
-        ) {
-            return null
-        }
-        val x = dx.remove(id) ?: 0.0
-        val y = dy.remove(id) ?: 0.0
-        val b = buttons.remove(id) ?: 0
-        val w = wheel.remove(id) ?: 0
-        return JSONObject()
-            .put("type", "pointer")
-            .put("dx", x)
-            .put("dy", y)
-            .put("buttons", b)
-            .put("wheel", w)
-            .toString()
     }
 }
 

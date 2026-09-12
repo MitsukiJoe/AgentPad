@@ -1,8 +1,17 @@
 import 'dart:async';
 import 'dart:convert' show jsonDecode, utf8;
 import 'dart:io' show HttpClient;
+import 'dart:math' as math;
 import 'dart:ui' show ImageFilter, TileMode;
-import 'package:flutter/services.dart' show MethodChannel;
+import 'package:flutter/services.dart'
+    show
+        DeviceOrientation,
+        HapticFeedback,
+        KeyDownEvent,
+        KeyRepeatEvent,
+        LogicalKeyboardKey,
+        MethodChannel,
+        SystemChrome;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -38,7 +47,8 @@ class AndroidUpdateInfo {
 }
 
 List<Uri> androidUpdateManifestUris([DateTime? now]) {
-  final hour = (now ?? DateTime.now()).toUtc().millisecondsSinceEpoch ~/ 3600000;
+  final hour =
+      (now ?? DateTime.now()).toUtc().millisecondsSinceEpoch ~/ 3600000;
   const path = 'gh/MitsukiJoe/AgentPad@update-manifest/agentpad-update.json';
   return [
     Uri.parse(
@@ -67,7 +77,8 @@ AndroidUpdateInfo newerAndroidUpdate(
   AndroidUpdateInfo? current,
   AndroidUpdateInfo candidate,
 ) {
-  if (current == null || isNewerAppVersion(candidate.version, current.version)) {
+  if (current == null ||
+      isNewerAppVersion(candidate.version, current.version)) {
     return candidate;
   }
   return current;
@@ -85,17 +96,14 @@ AndroidUpdateInfo? parseAndroidUpdateManifest(String raw) {
     final body = data['body'] as String? ?? '';
     final assets = data['assets'] as Map;
     final android = assets['android'];
-    if (android is! Map ||
-        tagName != 'v$version' ||
-        version.isEmpty) {
+    if (android is! Map || tagName != 'v$version' || version.isEmpty) {
       return null;
     }
     final apkUrl = android['url'] as String? ?? '';
     final sha256 = (android['sha256'] as String? ?? '').toLowerCase();
     final expectedUrl =
         'https://github.com/MitsukiJoe/AgentPad/releases/download/$tagName/agentpad.apk';
-    if (apkUrl != expectedUrl ||
-        !RegExp(r'^[0-9a-f]{64}$').hasMatch(sha256)) {
+    if (apkUrl != expectedUrl || !RegExp(r'^[0-9a-f]{64}$').hasMatch(sha256)) {
       return null;
     }
     return AndroidUpdateInfo(
@@ -134,11 +142,24 @@ class _AgentPadAppState extends State<AgentPadApp> {
     store = widget.store ?? PadStore();
     if (widget.store != null) {
       ready = true;
+      unawaited(_applyOrientation());
     } else {
-      store.load().then((_) {
+      store.load().then((_) async {
+        await _applyOrientation();
         if (mounted) setState(() => ready = true);
       });
     }
+  }
+
+  Future<void> _applyOrientation() {
+    return SystemChrome.setPreferredOrientations(
+      store.forceLandscape
+          ? const [
+              DeviceOrientation.landscapeLeft,
+              DeviceOrientation.landscapeRight,
+            ]
+          : const [],
+    );
   }
 
   @override
@@ -157,6 +178,10 @@ class _AgentPadAppState extends State<AgentPadApp> {
               store: store,
               enableAutomaticUpdateChecks: widget.enableAutomaticUpdateChecks,
               onThemeChanged: () => setState(() {}),
+              onLayoutChanged: () {
+                unawaited(_applyOrientation());
+                setState(() {});
+              },
             )
           : const Scaffold(body: SizedBox.shrink()),
     );
@@ -169,10 +194,12 @@ class HomePage extends StatefulWidget {
     required this.store,
     required this.enableAutomaticUpdateChecks,
     this.onThemeChanged,
+    this.onLayoutChanged,
   });
   final PadStore store;
   final bool enableAutomaticUpdateChecks;
   final VoidCallback? onThemeChanged;
+  final VoidCallback? onLayoutChanged;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -180,7 +207,9 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   static const _pageGutter = 12.0;
+  static const _deviceStripFadeWidth = 10.0;
   static const _updateCheckInterval = Duration(hours: 24);
+  static const _backspaceMuteAfterSend = Duration(seconds: 1);
 
   late final PadStore store;
   Hub? hub;
@@ -195,6 +224,7 @@ class _HomePageState extends State<HomePage> {
   Timer? trackPointTimer;
   Timer? padLongPressTimer;
   Timer? voiceTimer;
+  Timer? backspaceMuteTimer;
   Timer? updateNoticeTimer;
   Timer? updateCheckTimer;
   OverlayEntry? updateNoticeEntry;
@@ -207,7 +237,6 @@ class _HomePageState extends State<HomePage> {
   var rightDown = false;
   var pointerActive = false;
   final activePointerIds = <int>{};
-  double wheelAcc = 0;
   String? lastSent;
   var sendingText = false;
 
@@ -237,6 +266,16 @@ class _HomePageState extends State<HomePage> {
     );
     input.addListener(_onInputChanged);
     inputFocus.addListener(_onInputFocusChanged);
+    inputFocus.onKeyEvent = (_, event) {
+      if ((event is KeyDownEvent || event is KeyRepeatEvent) &&
+          event.logicalKey == LogicalKeyboardKey.backspace &&
+          input.text.isEmpty) {
+        _handleInputBackspace();
+        return KeyEventResult.handled;
+      }
+      return KeyEventResult.ignored;
+    };
+    NativeWs.inputBackspaceHandler = _handleInputBackspace;
     hub!.sync();
     unawaited(_applyPointerHzDefault());
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -278,9 +317,11 @@ class _HomePageState extends State<HomePage> {
     trackPointTimer?.cancel();
     padLongPressTimer?.cancel();
     voiceTimer?.cancel();
+    backspaceMuteTimer?.cancel();
     updateNoticeTimer?.cancel();
     updateCheckTimer?.cancel();
     updateNoticeEntry?.remove();
+    NativeWs.inputBackspaceHandler = null;
     hub?.dispose();
     input.removeListener(_onInputChanged);
     inputFocus.removeListener(_onInputFocusChanged);
@@ -289,10 +330,11 @@ class _HomePageState extends State<HomePage> {
     super.dispose();
   }
 
-  Future<void> _persist({bool theme = false}) async {
+  Future<void> _persist({bool theme = false, bool layout = false}) async {
     await store.save();
     hub?.sync();
     if (theme) widget.onThemeChanged?.call();
+    if (layout) widget.onLayoutChanged?.call();
     setState(() {});
   }
 
@@ -310,6 +352,10 @@ class _HomePageState extends State<HomePage> {
         await NativeWs.resetVoiceEvidence();
         voiceInput.reset();
         input.clear();
+        // Voice IMEs may still issue a stale correction delete against the
+        // text we just cleared; don't let that reach the PC as a Backspace.
+        backspaceMuteTimer?.cancel();
+        backspaceMuteTimer = Timer(_backspaceMuteAfterSend, () {});
         setState(() {});
       }
     } finally {
@@ -341,6 +387,14 @@ class _HomePageState extends State<HomePage> {
     voiceTimer?.cancel();
     voiceInput.reset();
     NativeWs.resetVoiceEvidence();
+  }
+
+  void _handleInputBackspace() {
+    if (!inputFocus.hasFocus || input.text.isNotEmpty) return;
+    if (backspaceMuteTimer?.isActive ?? false) return;
+    final h = hub;
+    if (h == null) return;
+    unawaited(h.sendSelected(keyMsg('Backspace', const [])));
   }
 
   void _updateVoiceCandidate(
@@ -386,7 +440,10 @@ class _HomePageState extends State<HomePage> {
     pointerTimer = null;
     if (trackPointVec != null) {
       trackPointTimer?.cancel();
-      trackPointTimer = Timer.periodic(_pointerPeriod, (_) => _emitTrackPoint());
+      trackPointTimer = Timer.periodic(
+        _pointerPeriod,
+        (_) => _emitTrackPoint(),
+      );
     }
   }
 
@@ -394,12 +451,16 @@ class _HomePageState extends State<HomePage> {
     final dx = (p['dx'] as num).toDouble();
     final dy = (p['dy'] as num).toDouble();
     final buttons = (p['buttons'] as num).toInt();
-    final wheel = (p['wheel'] as num).toInt();
-    if (hub?.sendPointer(dx, dy, buttons, wheel, immediate: immediate) ==
-        true) {
-      return;
-    }
-    hub?.sendSelectedFast(pointerMsg(dx, dy, buttons, wheel));
+    final wheel = (p['wheel'] as num).toDouble();
+    final h = hub;
+    if (h == null) return;
+    h.sendPointer(
+      dx,
+      dy,
+      buttons,
+      wheel,
+      immediate: immediate,
+    );
   }
 
   void _flushPointer() {
@@ -408,18 +469,8 @@ class _HomePageState extends State<HomePage> {
     _emitPointer(packet, immediate: true);
   }
 
-  void _addPointer(
-    double dx,
-    double dy,
-    int buttons,
-    int wheel, {
-    bool scaleWheel = true,
-  }) {
-    final sped = store.pointerSpeed;
-    final w = !scaleWheel || wheel == 0
-        ? wheel
-        : (wheel * store.wheelSpeed).round();
-    pointer.add(dx * sped, dy * sped, buttons, w);
+  void _addPointer(double dx, double dy, int buttons, double wheel) {
+    pointer.add(dx, dy, buttons, wheel);
     if (pointerCadence.due(_pointerNow)) _flushPointer();
     _startPointerTimer();
   }
@@ -437,12 +488,10 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-  void _queueImmediatePointer(double dx, double dy, int buttons, int wheel) {
+  void _queueImmediatePointer(double dx, double dy, int buttons, double wheel) {
     final pending = pointer.tick();
     if (pending != null) _emitPointer(pending);
-    final sped = store.pointerSpeed;
-    final w = wheel == 0 ? 0 : (wheel * store.wheelSpeed).round();
-    pointer.add(dx * sped, dy * sped, buttons, w);
+    pointer.add(dx, dy, buttons, wheel);
     _emitPointer(pointer.tick()!, immediate: true);
     pointerCadence.markSent(_pointerNow);
     _startPointerTimer();
@@ -462,8 +511,14 @@ class _HomePageState extends State<HomePage> {
         child: LayoutBuilder(
           builder: (context, constraints) {
             final display = View.of(context).display.size;
+            final textScale = math.max(
+              1.0,
+              MediaQuery.textScalerOf(context).scale(14) / 14,
+            );
             return constraints.maxWidth > constraints.maxHeight &&
-                    display.width > display.height
+                    display.width > display.height &&
+                    constraints.maxWidth >= 640 * textScale &&
+                    constraints.maxHeight >= _inputBoxHeight + 160 * textScale
                 ? _landscapeLayout()
                 : _portraitLayout(constraints);
           },
@@ -483,7 +538,8 @@ class _HomePageState extends State<HomePage> {
           _topBar(),
           _actionButtons(),
           _textInput(),
-          if (store.devices.isNotEmpty) _deviceStrip(),
+          if (store.devices.isNotEmpty && store.deviceStripPlacement == 'input')
+            _deviceStrip(),
           if (store.homePointerQuickSwitch) _pointerModeSelector(),
           _pointerArea(),
           _shortcutSection(),
@@ -514,7 +570,9 @@ class _HomePageState extends State<HomePage> {
         key: const ValueKey('landscape-pointer-scroll'),
         child: Column(
           children: [
-            if (store.devices.isNotEmpty) _deviceStrip(),
+            if (store.devices.isNotEmpty &&
+                store.deviceStripPlacement == 'input')
+              _deviceStrip(),
             if (store.homePointerQuickSwitch) _pointerModeSelector(),
             _pointerArea(),
             _shortcutSection(),
@@ -562,7 +620,15 @@ class _HomePageState extends State<HomePage> {
             ],
           ),
         ),
-        const Spacer(),
+        if (store.devices.isNotEmpty && store.deviceStripPlacement == 'top')
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.only(left: 6),
+              child: _deviceStrip(embedded: true),
+            ),
+          )
+        else
+          const Spacer(),
         IconButton(
           tooltip: '关于',
           onPressed: _openAbout,
@@ -624,9 +690,7 @@ class _HomePageState extends State<HomePage> {
 
   Widget _textInput() {
     final accent = _accentColor;
-    final border = OutlineInputBorder(
-      borderSide: BorderSide(color: accent),
-    );
+    final border = OutlineInputBorder(borderSide: BorderSide(color: accent));
     final focused = OutlineInputBorder(
       borderSide: BorderSide(color: accent, width: 2),
     );
@@ -1139,11 +1203,14 @@ class _HomePageState extends State<HomePage> {
       ? 'disconnected'
       : (_onlineCount == 0 ? 'connecting' : 'connected');
 
-  String get _connectionText => switch (_connectionState) {
-    'connected' => '已连接 $_onlineCount 台',
-    'connecting' => '连接中',
-    _ => '未连接',
-  };
+  String get _connectionText {
+    if (store.deviceStripPlacement == 'top') return '$_onlineCount';
+    return switch (_connectionState) {
+      'connected' => '已连接 $_onlineCount 台',
+      'connecting' => '连接中',
+      _ => '未连接',
+    };
+  }
 
   Color get _connectionColor => switch (_connectionState) {
     'connected' => const Color(0xFF22B573),
@@ -1169,7 +1236,11 @@ class _HomePageState extends State<HomePage> {
       clipBehavior: Clip.none,
       children: [
         ImageFiltered(
-          imageFilter: ImageFilter.blur(sigmaX: 2.8, sigmaY: 2.8, tileMode: TileMode.decal),
+          imageFilter: ImageFilter.blur(
+            sigmaX: 2.8,
+            sigmaY: 2.8,
+            tileMode: TileMode.decal,
+          ),
           child: Icon(
             Icons.computer,
             size: 18,
@@ -1186,12 +1257,15 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _deviceStrip() => Padding(
-    padding: const EdgeInsets.fromLTRB(_pageGutter, 0, _pageGutter, 8),
-    child: SizedBox(
-      height: 40,
+  Widget _deviceStrip({bool embedded = false}) {
+    final strip = SizedBox(
+      height: embedded ? 48 : 40,
       child: ListView.separated(
         key: const ValueKey('device-strip'),
+        clipBehavior: Clip.none,
+        padding: embedded
+            ? const EdgeInsets.symmetric(horizontal: _deviceStripFadeWidth)
+            : null,
         scrollDirection: Axis.horizontal,
         itemCount: store.devices.length,
         separatorBuilder: (_, _) => const SizedBox(width: 10),
@@ -1260,6 +1334,38 @@ class _HomePageState extends State<HomePage> {
           );
         },
       ),
+    );
+    return Padding(
+      padding: embedded
+          ? EdgeInsets.zero
+          : const EdgeInsets.fromLTRB(_pageGutter, 0, _pageGutter, 8),
+      child: embedded ? _deviceStripEdgeFade(strip) : strip,
+    );
+  }
+
+  Widget _deviceStripEdgeFade(Widget child) => ShaderMask(
+    key: const ValueKey('device-strip-edge-fade'),
+    blendMode: BlendMode.dstIn,
+    shaderCallback: (bounds) {
+      final edge = bounds.width <= 0
+          ? 0.0
+          : math.min(0.45, _deviceStripFadeWidth / bounds.width);
+      return LinearGradient(
+        begin: Alignment.centerLeft,
+        end: Alignment.centerRight,
+        colors: const [
+          Colors.transparent,
+          Colors.black,
+          Colors.black,
+          Colors.transparent,
+        ],
+        stops: [0, edge, 1 - edge, 1],
+      ).createShader(bounds);
+    },
+    child: ClipRect(
+      key: const ValueKey('device-strip-horizontal-clip'),
+      clipper: _HorizontalOnlyClipper(1 / MediaQuery.devicePixelRatioOf(context)),
+      child: child,
     ),
   );
 
@@ -1402,7 +1508,7 @@ class _HomePageState extends State<HomePage> {
         child: Listener(
           onPointerSignal: (e) {
             if (e is PointerScrollEvent) {
-              _addPointer(0, 0, 0, e.scrollDelta.dy.round());
+              _addPointer(0, 0, 0, -e.scrollDelta.dy);
             }
           },
           onPointerDown: (e) {
@@ -1411,7 +1517,7 @@ class _HomePageState extends State<HomePage> {
             if (touchpad.pointerCount == 1) {
               padLongPressTimer = Timer(
                 kLongPressTimeout,
-                touchpad.armLongPress,
+                _armTouchpadLongPress,
               );
             }
           },
@@ -1453,6 +1559,13 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  void _armTouchpadLongPress() {
+    if (!touchpad.armLongPress()) return;
+    if (store.longPressHaptic) {
+      HapticFeedback.selectionClick();
+    }
+  }
+
   void _applyPadActions(List<TouchpadAction> actions) {
     for (final action in actions) {
       if (action.immediate && action.wheel == 0) {
@@ -1463,7 +1576,7 @@ class _HomePageState extends State<HomePage> {
           action.wheel,
         );
       } else {
-        _addPointer(action.dx, action.dy, action.buttons, action.wheel);
+        _addPointer(action.dx, action.dy, action.buttons, -action.wheel);
       }
     }
   }
@@ -1646,7 +1759,7 @@ class _HomePageState extends State<HomePage> {
 
   Widget _withWheel(bool dark, Widget child, {bool flat = false}) {
     final wheel = flat ? _flatWheel(dark) : _wheel(dark);
-    const gap = SizedBox(width: 10);
+    const gap = SizedBox(width: 8);
     return Row(
       children: store.wheelSide == 'left'
           ? [wheel, gap, Expanded(child: child)]
@@ -1706,7 +1819,7 @@ class _HomePageState extends State<HomePage> {
         },
         child: Container(
           key: const ValueKey('touchpad-wheel'),
-          width: 32,
+          width: 44,
           height: double.infinity,
           decoration: BoxDecoration(
             color: _controlBackground(brightness),
@@ -1724,11 +1837,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _scrollWheel(double dy) {
-    wheelAcc += dy * store.wheelSpeed;
-    final wheel = wheelAcc.truncate();
-    if (wheel == 0) return;
-    wheelAcc -= wheel;
-    _addPointer(0, 0, _btns, wheel, scaleWheel: false);
+    if (dy != 0) _addPointer(0, 0, _btns, -dy);
   }
 
   Future<void> _openSettings() async {
@@ -1743,368 +1852,457 @@ class _HomePageState extends State<HomePage> {
           ),
         ),
         child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Text('外观', style: TextStyle(fontSize: 18)),
-          const SizedBox(height: 16),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            children: [
-              _themePick(
-                ctx,
-                setSheet,
-                Icons.brightness_auto,
-                'system',
-                '系统',
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('外观', style: TextStyle(fontSize: 18)),
+            const SizedBox(height: 16),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                _themePick(
+                  ctx,
+                  setSheet,
+                  Icons.brightness_auto,
+                  'system',
+                  '系统',
+                ),
+                _themePick(ctx, setSheet, Icons.light_mode, 'light', '浅色'),
+                _themePick(ctx, setSheet, Icons.dark_mode, 'dark', '深色'),
+              ],
+            ),
+            const SizedBox(height: 20),
+            const Align(alignment: Alignment.centerLeft, child: Text('主题色')),
+            const SizedBox(height: 8),
+            FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  _colorPick(ctx, setSheet, 'monochrome', '黑白'),
+                  _colorPick(ctx, setSheet, 'blue', '蓝色'),
+                  _colorPick(ctx, setSheet, 'pink', '粉色'),
+                  _colorPick(ctx, setSheet, 'green', '绿色'),
+                  _colorPick(ctx, setSheet, 'gold', '金色'),
+                  _colorPick(ctx, setSheet, 'red', '红色'),
+                ],
               ),
-              _themePick(
-                ctx,
-                setSheet,
-                Icons.light_mode,
-                'light',
-                '浅色',
+            ),
+            const SizedBox(height: 20),
+            const Align(alignment: Alignment.centerLeft, child: Text('桌面图标')),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: SegmentedButton<String>(
+                showSelectedIcon: false,
+                segments: const [
+                  ButtonSegment(value: 'system', label: Text('跟随系统')),
+                  ButtonSegment(value: 'white', label: Text('默认浅色')),
+                  ButtonSegment(value: 'black', label: Text('沉稳深色')),
+                ],
+                selected: {store.appIcon},
+                onSelectionChanged: (s) async {
+                  store.appIcon = s.first;
+                  await _persist();
+                  _applyAppIcon(store.appIcon);
+                  setSheet(() {});
+                },
               ),
-              _themePick(
-                ctx,
-                setSheet,
-                Icons.dark_mode,
-                'dark',
-                '深色',
+            ),
+            const SizedBox(height: 24),
+            Row(
+              children: [
+                const Expanded(child: Text('连接后添加全部 IP')),
+                Transform.scale(
+                  scale: 0.78,
+                  alignment: Alignment.centerRight,
+                  child: Switch(
+                    key: const ValueKey('collect-all-ips'),
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    value: store.collectAllIps,
+                    onChanged: (v) async {
+                      store.collectAllIps = v;
+                      await _persist();
+                      setSheet(() {});
+                    },
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 24),
+            const Align(
+              alignment: Alignment.centerLeft,
+              child: Text('已连接设备的快捷开关显示在什么地方'),
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              key: const ValueKey('device-strip-placement'),
+              width: double.infinity,
+              child: SegmentedButton<String>(
+                showSelectedIcon: false,
+                segments: const [
+                  ButtonSegment(value: 'input', label: Text('输入框下方')),
+                  ButtonSegment(value: 'top', label: Text('顶部')),
+                ],
+                selected: {store.deviceStripPlacement},
+                onSelectionChanged: (s) async {
+                  store.deviceStripPlacement = s.first;
+                  await _persist();
+                  setSheet(() {});
+                },
               ),
-            ],
-          ),
-          const SizedBox(height: 20),
-          const Align(
-            alignment: Alignment.centerLeft,
-            child: Text('主题色'),
-          ),
-          const SizedBox(height: 8),
-          FittedBox(
-            fit: BoxFit.scaleDown,
-            child: Row(
+            ),
+            const SizedBox(height: 24),
+            Row(
+              children: [
+                const Text('语音自动发送延迟'),
+                IconButton(
+                  tooltip: '语音自动发送说明',
+                  onPressed: _showVoiceHelp,
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints.tightFor(
+                    width: 28,
+                    height: 28,
+                  ),
+                  iconSize: 18,
+                  icon: const Icon(Icons.info_outline),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: SegmentedButton<int>(
+                showSelectedIcon: false,
+                segments: const [
+                  ButtonSegment(value: 0, label: Text('无延迟')),
+                  ButtonSegment(value: 500, label: Text('0.5 秒')),
+                  ButtonSegment(value: 1000, label: Text('1 秒')),
+                  ButtonSegment(value: 1500, label: Text('1.5 秒')),
+                ],
+                selected: {store.voiceDelayMs},
+                onSelectionChanged: (s) async {
+                  store.voiceDelayMs = s.first;
+                  await _persist();
+                  setSheet(() {});
+                },
+              ),
+            ),
+            const SizedBox(height: 24),
+            Row(
+              children: [
+                const Expanded(child: Text('切换光标设备')),
+                const Text('首页显示'),
+                const SizedBox(width: 6),
+                Transform.scale(
+                  scale: 0.78,
+                  alignment: Alignment.centerRight,
+                  child: Switch(
+                    key: const ValueKey('home-pointer-quick-switch'),
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    value: store.homePointerQuickSwitch,
+                    onChanged: (v) async {
+                      store.homePointerQuickSwitch = v;
+                      await _persist();
+                      setSheet(() {});
+                    },
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              key: const ValueKey('settings-pointer-mode-sync'),
+              width: double.infinity,
+              child: SegmentedButton<String>(
+                showSelectedIcon: false,
+                segments: const [
+                  ButtonSegment(value: 'trackpad', label: Text('触控板')),
+                  ButtonSegment(value: 'trackball', label: Text('轨迹球')),
+                  ButtonSegment(value: 'trackpoint', label: Text('小红点')),
+                ],
+                selected: {store.pointerMode},
+                onSelectionChanged: (s) async {
+                  _stopTrackPoint();
+                  store.pointerMode = s.first;
+                  await _persist();
+                  setSheet(() {});
+                },
+              ),
+            ),
+            const SizedBox(height: 24),
+            const Align(alignment: Alignment.centerLeft, child: Text('触控板大小')),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: SegmentedButton<String>(
+                showSelectedIcon: false,
+                segments: const [
+                  ButtonSegment(value: 'small', label: Text('小')),
+                  ButtonSegment(value: 'medium', label: Text('中')),
+                  ButtonSegment(value: 'large', label: Text('大')),
+                ],
+                selected: {store.pointerSize},
+                onSelectionChanged: (s) async {
+                  store.pointerSize = s.first;
+                  await _persist();
+                  setSheet(() {});
+                },
+              ),
+            ),
+            const SizedBox(height: 24),
+            Row(
+              children: [
+                const Expanded(child: Text('长按轻震反馈')),
+                Transform.scale(
+                  scale: 0.78,
+                  alignment: Alignment.centerRight,
+                  child: Switch(
+                    key: const ValueKey('long-press-haptic'),
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    value: store.longPressHaptic,
+                    onChanged: (v) async {
+                      store.longPressHaptic = v;
+                      await _persist();
+                      setSheet(() {});
+                    },
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 24),
+            const Align(alignment: Alignment.centerLeft, child: Text('滚轮位置')),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: SegmentedButton<String>(
+                showSelectedIcon: false,
+                segments: const [
+                  ButtonSegment(value: 'left', label: Text('左侧')),
+                  ButtonSegment(value: 'right', label: Text('右侧')),
+                ],
+                selected: {store.wheelSide},
+                onSelectionChanged: (s) async {
+                  store.wheelSide = s.first;
+                  await _persist();
+                  setSheet(() {});
+                },
+              ),
+            ),
+            const SizedBox(height: 16),
+            const Align(alignment: Alignment.centerLeft, child: Text('滚轮方向反转')),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: _platformSwitch(
+                    key: const ValueKey('wheel-reverse-windows'),
+                    label: 'Windows',
+                    value: store.wheelReverseWindows,
+                    onChanged: (v) async {
+                      store.wheelReverseWindows = v;
+                      await _persist();
+                      setSheet(() {});
+                    },
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _platformSwitch(
+                    key: const ValueKey('wheel-reverse-mac'),
+                    label: 'Mac',
+                    value: store.wheelReverseMac,
+                    onChanged: (v) async {
+                      store.wheelReverseMac = v;
+                      await _persist();
+                      setSheet(() {});
+                    },
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 24),
+            const Align(alignment: Alignment.centerLeft, child: Text('指针速度')),
+            const SizedBox(height: 8),
+            _platformSpeedSlider(
+              key: const ValueKey('pointer-speed-windows'),
+              label: 'Windows',
+              value: store.pointerSpeedWindows,
+              gears: PadStore.pointerGears,
+              onChanged: (v) async {
+                store.pointerSpeedWindows = v;
+                await _persist();
+                setSheet(() {});
+              },
+            ),
+            const SizedBox(height: 8),
+            _platformSpeedSlider(
+              key: const ValueKey('pointer-speed-mac'),
+              label: 'Mac',
+              value: store.pointerSpeedMac,
+              gears: PadStore.pointerGears,
+              onChanged: (v) async {
+                store.pointerSpeedMac = v;
+                await _persist();
+                setSheet(() {});
+              },
+            ),
+            const SizedBox(height: 16),
+            const Align(alignment: Alignment.centerLeft, child: Text('滚轮速度')),
+            const SizedBox(height: 8),
+            _platformSpeedSlider(
+              key: const ValueKey('wheel-speed-windows'),
+              label: 'Windows',
+              value: store.wheelSpeedWindows,
+              gears: PadStore.wheelGearsWindows,
+              onChanged: (v) async {
+                store.wheelSpeedWindows = v;
+                await _persist();
+                setSheet(() {});
+              },
+            ),
+            const SizedBox(height: 8),
+            _platformSpeedSlider(
+              key: const ValueKey('wheel-speed-mac'),
+              label: 'Mac',
+              value: store.wheelSpeedMac,
+              gears: PadStore.wheelGears,
+              onChanged: (v) async {
+                store.wheelSpeedMac = v;
+                await _persist();
+                setSheet(() {});
+              },
+            ),
+            const SizedBox(height: 24),
+            const Align(alignment: Alignment.centerLeft, child: Text('指针发送频率')),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: SegmentedButton<int>(
+                key: const ValueKey('pointer-hz'),
+                showSelectedIcon: false,
+                segments: const [
+                  ButtonSegment(value: 60, label: Text('60Hz')),
+                  ButtonSegment(value: 120, label: Text('120Hz')),
+                  ButtonSegment(value: 240, label: Text('240Hz')),
+                ],
+                selected: {store.pointerHz},
+                onSelectionChanged: (s) async {
+                  store.pointerHz = s.first;
+                  store.pointerHzManual = true;
+                  _retunePointerCadence();
+                  await _persist();
+                  setSheet(() {});
+                },
+              ),
+            ),
+            const SizedBox(height: 24),
+            const Align(alignment: Alignment.centerLeft, child: Text('横屏布局')),
+            const SizedBox(height: 8),
+            SizedBox(
+              key: const ValueKey('landscape-pointer-side-setting'),
+              width: double.infinity,
+              child: SegmentedButton<String>(
+                showSelectedIcon: false,
+                segments: const [
+                  ButtonSegment(value: 'left', label: Text('触控在左')),
+                  ButtonSegment(value: 'right', label: Text('触控在右')),
+                ],
+                selected: {store.landscapePointerSide},
+                onSelectionChanged: (s) async {
+                  store.landscapePointerSide = s.first;
+                  await _persist();
+                  setSheet(() {});
+                },
+              ),
+            ),
+            const SizedBox(height: 24),
+            Row(
+              children: [
+                const Expanded(child: Text('强制横屏')),
+                Transform.scale(
+                  scale: 0.78,
+                  alignment: Alignment.centerRight,
+                  child: Switch(
+                    key: const ValueKey('force-landscape'),
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    value: store.forceLandscape,
+                    onChanged: (v) async {
+                      store.forceLandscape = v;
+                      await _persist(layout: true);
+                      setSheet(() {});
+                    },
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 24),
+            const Divider(height: 1),
+            const SizedBox(height: 16),
+            Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                _colorPick(ctx, setSheet, 'monochrome', '黑白'),
-                _colorPick(ctx, setSheet, 'blue', '蓝色'),
-                _colorPick(ctx, setSheet, 'pink', '粉色'),
-                _colorPick(ctx, setSheet, 'green', '绿色'),
-                _colorPick(ctx, setSheet, 'gold', '金色'),
-                _colorPick(ctx, setSheet, 'red', '红色'),
-              ],
-            ),
-          ),
-          const SizedBox(height: 20),
-          const Align(
-            alignment: Alignment.centerLeft,
-            child: Text('桌面图标'),
-          ),
-          const SizedBox(height: 8),
-          SizedBox(
-            width: double.infinity,
-            child: SegmentedButton<String>(
-              showSelectedIcon: false,
-              segments: const [
-                ButtonSegment(value: 'system', label: Text('跟随系统')),
-                ButtonSegment(value: 'white', label: Text('默认浅色')),
-                ButtonSegment(value: 'black', label: Text('沉稳深色')),
-              ],
-              selected: {store.appIcon},
-              onSelectionChanged: (s) async {
-                store.appIcon = s.first;
-                await _persist();
-                _applyAppIcon(store.appIcon);
-                setSheet(() {});
-              },
-            ),
-          ),
-          const SizedBox(height: 24),
-          Row(
-            children: [
-              const Expanded(child: Text('连接后添加全部 IP')),
-              Transform.scale(
-                scale: 0.78,
-                alignment: Alignment.centerRight,
-                child: Switch(
-                  key: const ValueKey('collect-all-ips'),
-                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  value: store.collectAllIps,
-                  onChanged: (v) async {
-                    store.collectAllIps = v;
-                    await _persist();
-                    setSheet(() {});
-                  },
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 24),
-          Row(
-            children: [
-              const Text('语音自动发送延迟'),
-              IconButton(
-                tooltip: '语音自动发送说明',
-                onPressed: _showVoiceHelp,
-                visualDensity: VisualDensity.compact,
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints.tightFor(width: 28, height: 28),
-                iconSize: 18,
-                icon: const Icon(Icons.info_outline),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          SizedBox(
-            width: double.infinity,
-            child: SegmentedButton<int>(
-              showSelectedIcon: false,
-              segments: const [
-                ButtonSegment(value: 0, label: Text('无延迟')),
-                ButtonSegment(value: 500, label: Text('0.5 秒')),
-                ButtonSegment(value: 1000, label: Text('1 秒')),
-                ButtonSegment(value: 1500, label: Text('1.5 秒')),
-              ],
-              selected: {store.voiceDelayMs},
-              onSelectionChanged: (s) async {
-                store.voiceDelayMs = s.first;
-                await _persist();
-                setSheet(() {});
-              },
-            ),
-          ),
-          const SizedBox(height: 24),
-          Row(
-            children: [
-              const Expanded(child: Text('切换光标设备')),
-              const Text('首页显示'),
-              const SizedBox(width: 6),
-              Transform.scale(
-                scale: 0.78,
-                alignment: Alignment.centerRight,
-                child: Switch(
-                  key: const ValueKey('home-pointer-quick-switch'),
-                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  value: store.homePointerQuickSwitch,
-                  onChanged: (v) async {
-                    store.homePointerQuickSwitch = v;
-                    await _persist();
-                    setSheet(() {});
-                  },
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          SizedBox(
-            key: const ValueKey('settings-pointer-mode-sync'),
-            width: double.infinity,
-            child: SegmentedButton<String>(
-              showSelectedIcon: false,
-              segments: const [
-                ButtonSegment(value: 'trackpad', label: Text('触控板')),
-                ButtonSegment(value: 'trackball', label: Text('轨迹球')),
-                ButtonSegment(value: 'trackpoint', label: Text('小红点')),
-              ],
-              selected: {store.pointerMode},
-              onSelectionChanged: (s) async {
-                _stopTrackPoint();
-                store.pointerMode = s.first;
-                await _persist();
-                setSheet(() {});
-              },
-            ),
-          ),
-          const SizedBox(height: 24),
-          const Align(
-            alignment: Alignment.centerLeft,
-            child: Text('滚轮位置'),
-          ),
-          const SizedBox(height: 8),
-          SizedBox(
-            width: double.infinity,
-            child: SegmentedButton<String>(
-              showSelectedIcon: false,
-              segments: const [
-                ButtonSegment(value: 'left', label: Text('左侧')),
-                ButtonSegment(value: 'right', label: Text('右侧')),
-              ],
-              selected: {store.wheelSide},
-              onSelectionChanged: (s) async {
-                store.wheelSide = s.first;
-                await _persist();
-                setSheet(() {});
-              },
-            ),
-          ),
-          const SizedBox(height: 24),
-          const Align(
-            alignment: Alignment.centerLeft,
-            child: Text('触控板大小'),
-          ),
-          const SizedBox(height: 8),
-          SizedBox(
-            width: double.infinity,
-            child: SegmentedButton<String>(
-              showSelectedIcon: false,
-              segments: const [
-                ButtonSegment(value: 'small', label: Text('小')),
-                ButtonSegment(value: 'medium', label: Text('中')),
-                ButtonSegment(value: 'large', label: Text('大')),
-              ],
-              selected: {store.pointerSize},
-              onSelectionChanged: (s) async {
-                store.pointerSize = s.first;
-                await _persist();
-                setSheet(() {});
-              },
-            ),
-          ),
-          const SizedBox(height: 24),
-          const Align(
-            alignment: Alignment.centerLeft,
-            child: Text('指针速度'),
-          ),
-          const SizedBox(height: 8),
-          _speedGearSlider(
-            key: const ValueKey('pointer-speed'),
-            value: store.pointerSpeed,
-            gears: PadStore.pointerGears,
-            onChanged: (v) async {
-              store.pointerSpeed = v;
-              await _persist();
-              setSheet(() {});
-            },
-          ),
-          const SizedBox(height: 16),
-          const Align(
-            alignment: Alignment.centerLeft,
-            child: Text('滚轮速度'),
-          ),
-          const SizedBox(height: 8),
-          _speedGearSlider(
-            key: const ValueKey('wheel-speed'),
-            value: store.wheelSpeed,
-            gears: PadStore.wheelGears,
-            onChanged: (v) async {
-              store.wheelSpeed = v;
-              await _persist();
-              setSheet(() {});
-            },
-          ),
-          const SizedBox(height: 24),
-          const Align(
-            alignment: Alignment.centerLeft,
-            child: Text('指针发送频率'),
-          ),
-          const SizedBox(height: 8),
-          SizedBox(
-            width: double.infinity,
-            child: SegmentedButton<int>(
-              key: const ValueKey('pointer-hz'),
-              showSelectedIcon: false,
-              segments: const [
-                ButtonSegment(value: 60, label: Text('60Hz')),
-                ButtonSegment(value: 120, label: Text('120Hz')),
-                ButtonSegment(value: 240, label: Text('240Hz')),
-              ],
-              selected: {store.pointerHz},
-              onSelectionChanged: (s) async {
-                store.pointerHz = s.first;
-                store.pointerHzManual = true;
-                _retunePointerCadence();
-                await _persist();
-                setSheet(() {});
-              },
-            ),
-          ),
-          const SizedBox(height: 24),
-          const Align(
-            alignment: Alignment.centerLeft,
-            child: Text('横屏布局'),
-          ),
-          const SizedBox(height: 8),
-          SizedBox(
-            key: const ValueKey('landscape-pointer-side-setting'),
-            width: double.infinity,
-            child: SegmentedButton<String>(
-              showSelectedIcon: false,
-              segments: const [
-                ButtonSegment(value: 'left', label: Text('触控在左')),
-                ButtonSegment(value: 'right', label: Text('触控在右')),
-              ],
-              selected: {store.landscapePointerSide},
-              onSelectionChanged: (s) async {
-                store.landscapePointerSide = s.first;
-                await _persist();
-                setSheet(() {});
-              },
-            ),
-          ),
-          const SizedBox(height: 24),
-          const Divider(height: 1),
-          const SizedBox(height: 16),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              InkWell(
-                key: const ValueKey('settings-version'),
-                borderRadius: BorderRadius.circular(8),
-                onTap: checkingUpdate
-                    ? null
-                    : () => _handleUpdateTap(
-                        refresh: () {
-                          if (ctx.mounted) setSheet(() {});
-                        },
+                InkWell(
+                  key: const ValueKey('settings-version'),
+                  borderRadius: BorderRadius.circular(8),
+                  onTap: checkingUpdate
+                      ? null
+                      : () => _handleUpdateTap(
+                          refresh: () {
+                            if (ctx.mounted) setSheet(() {});
+                          },
+                        ),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    child: Text(
+                      '版本 $appVersion',
+                      style: TextStyle(
+                        color: _controlForeground(
+                          Theme.of(ctx).brightness,
+                        ).withValues(alpha: 0.6),
+                        fontSize: 13,
                       ),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 8),
-                  child: Text(
-                    '版本 $appVersion',
-                    style: TextStyle(
-                      color: _controlForeground(Theme.of(ctx).brightness)
-                          .withValues(alpha: 0.6),
-                      fontSize: 13,
                     ),
                   ),
                 ),
-              ),
-              TextButton.icon(
-                key: const ValueKey('settings-update-action'),
-                onPressed: checkingUpdate
-                    ? null
-                    : () => _handleUpdateTap(
-                        refresh: () {
-                          if (ctx.mounted) setSheet(() {});
-                        },
-                      ),
-                icon: checkingUpdate
-                    ? const SizedBox.square(
-                        dimension: 14,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : Icon(
-                        pendingUpdateTag == null
-                            ? Icons.refresh
-                            : Icons.circle,
-                        size: pendingUpdateTag == null ? 16 : 7,
-                        color: pendingUpdateTag == null
-                            ? null
-                            : const Color(0xFF74B580),
-                      ),
-                label: Text(
-                  checkingUpdate
-                      ? '检查中...'
-                      : pendingUpdateTag == null
-                      ? '检查更新'
-                      : '可更新',
-                  style: pendingUpdateTag == null
+                TextButton.icon(
+                  key: const ValueKey('settings-update-action'),
+                  onPressed: checkingUpdate
                       ? null
-                      : const TextStyle(color: Color(0xFF74B580)),
+                      : () => _handleUpdateTap(
+                          refresh: () {
+                            if (ctx.mounted) setSheet(() {});
+                          },
+                        ),
+                  icon: checkingUpdate
+                      ? const SizedBox.square(
+                          dimension: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : Icon(
+                          pendingUpdateTag == null
+                              ? Icons.refresh
+                              : Icons.circle,
+                          size: pendingUpdateTag == null ? 16 : 7,
+                          color: pendingUpdateTag == null
+                              ? null
+                              : const Color(0xFF74B580),
+                        ),
+                  label: Text(
+                    checkingUpdate
+                        ? '检查中...'
+                        : pendingUpdateTag == null
+                        ? '检查更新'
+                        : '可更新',
+                    style: pendingUpdateTag == null
+                        ? null
+                        : const TextStyle(color: Color(0xFF74B580)),
+                  ),
                 ),
-              ),
-            ],
-          ),
-        ],
-      ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -2115,7 +2313,9 @@ class _HomePageState extends State<HomePage> {
       final isDark = Theme.of(context).brightness == Brightness.dark;
       target = isDark ? 'black' : 'white';
     }
-    const MethodChannel('agentpad/ws').invokeMethod<bool>('setAppIcon', {'icon': target});
+    const MethodChannel(
+      'agentpad/ws',
+    ).invokeMethod<bool>('setAppIcon', {'icon': target});
   }
 
   void _showUpdateNotice(String message) {
@@ -2136,7 +2336,10 @@ class _HomePageState extends State<HomePage> {
             child: Material(
               color: Colors.transparent,
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 12,
+                ),
                 decoration: BoxDecoration(
                   color: _controlBackground(brightness),
                   border: Border.all(color: _controlBorder(brightness)),
@@ -2283,7 +2486,9 @@ class _HomePageState extends State<HomePage> {
           FilledButton(
             onPressed: () {
               Navigator.pop(dCtx);
-              const MethodChannel('agentpad/ws').invokeMethod<bool>('openUrl', {'url': url});
+              const MethodChannel(
+                'agentpad/ws',
+              ).invokeMethod<bool>('openUrl', {'url': url});
             },
             child: const Text('下载并更新'),
           ),
@@ -2319,8 +2524,9 @@ class _HomePageState extends State<HomePage> {
                   Text(
                     '版本 $appVersion',
                     style: TextStyle(
-                      color: _controlForeground(brightness)
-                          .withValues(alpha: 0.6),
+                      color: _controlForeground(
+                        brightness,
+                      ).withValues(alpha: 0.6),
                       fontSize: 12,
                     ),
                   ),
@@ -2348,8 +2554,9 @@ class _HomePageState extends State<HomePage> {
                     Icon(
                       Icons.refresh,
                       size: 13,
-                      color: _controlForeground(brightness)
-                          .withValues(alpha: 0.45),
+                      color: _controlForeground(
+                        brightness,
+                      ).withValues(alpha: 0.45),
                     ),
                 ],
               ),
@@ -2380,7 +2587,10 @@ class _HomePageState extends State<HomePage> {
           child: LayoutBuilder(
             builder: (ctx, constraints) {
               return Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 20,
+                  vertical: 24,
+                ),
                 child: Center(
                   child: ConstrainedBox(
                     constraints: BoxConstraints(
@@ -2397,7 +2607,12 @@ class _HomePageState extends State<HomePage> {
                           children: [
                             SingleChildScrollView(
                               key: scrollKey,
-                              padding: const EdgeInsets.fromLTRB(20, 56, 20, 28),
+                              padding: const EdgeInsets.fromLTRB(
+                                20,
+                                56,
+                                20,
+                                28,
+                              ),
                               child: builder(ctx, setSheet),
                             ),
                             Positioned(
@@ -2491,6 +2706,52 @@ class _HomePageState extends State<HomePage> {
                 ),
             ],
           ),
+        ),
+      ],
+    );
+  }
+
+  Widget _platformSwitch({
+    required Key key,
+    required String label,
+    required bool value,
+    required ValueChanged<bool> onChanged,
+  }) {
+    return Row(
+      key: key,
+      children: [
+        Expanded(child: Text(label)),
+        Transform.scale(
+          scale: 0.78,
+          alignment: Alignment.centerRight,
+          child: Switch(
+            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            value: value,
+            onChanged: onChanged,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _platformSpeedSlider({
+    required Key key,
+    required String label,
+    required double value,
+    required List<double> gears,
+    required ValueChanged<double> onChanged,
+  }) {
+    return Column(
+      key: key,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label),
+        const SizedBox(height: 4),
+        _speedGearSlider(
+          key: ValueKey('$label-wheel-speed-slider'),
+          value: value,
+          gears: gears,
+          onChanged: onChanged,
         ),
       ],
     );
@@ -2650,6 +2911,7 @@ class _HomePageState extends State<HomePage> {
                                 // come in only if collectAllIps after connect.
                                 ips: [q.ip],
                                 port: q.port,
+                                os: q.os,
                               ),
                             );
                             await _persist();
@@ -3041,7 +3303,11 @@ Color _themeSeed(String value, [Brightness brightness = Brightness.light]) =>
       _ => const Color(0xFF5EAFF9),
     };
 
-Color onAccentForeground(Color accent, Brightness brightness, String themeColor) {
+Color onAccentForeground(
+  Color accent,
+  Brightness brightness,
+  String themeColor,
+) {
   if (themeColor == 'monochrome') {
     return ThemeData.estimateBrightnessForColor(accent) == Brightness.dark
         ? Colors.white
@@ -3144,6 +3410,22 @@ class _ScanPageState extends State<ScanPage> {
       ),
     );
   }
+}
+
+class _HorizontalOnlyClipper extends CustomClipper<Rect> {
+  const _HorizontalOnlyClipper(this.pixelInset);
+
+  final double pixelInset;
+
+  @override
+  Rect getClip(Size size) {
+    final inset = math.min(pixelInset, size.width / 2);
+    return Rect.fromLTRB(inset, -32, size.width - inset, size.height + 32);
+  }
+
+  @override
+  bool shouldReclip(_HorizontalOnlyClipper oldClipper) =>
+      pixelInset != oldClipper.pixelInset;
 }
 
 class _ClaimParentScroll extends StatelessWidget {

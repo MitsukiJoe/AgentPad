@@ -25,6 +25,7 @@ android {
 
     defaultConfig {
         applicationId = "app.agentpad"
+        testInstrumentationRunner = "app.agentpad.InputConnectionChecks"
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
@@ -77,6 +78,8 @@ kotlin {
 
 dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20250517")
 }
 
 flutter {

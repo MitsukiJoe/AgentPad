@@ -12,10 +12,10 @@ class PointerCoalescer {
   double dx = 0;
   double dy = 0;
   int buttons = 0;
-  int wheel = 0;
+  double wheel = 0;
   bool pending = false;
 
-  void add(double ddx, double ddy, int btn, int wh) {
+  void add(double ddx, double ddy, int btn, double wh) {
     dx += ddx;
     dy += ddy;
     buttons = btn;

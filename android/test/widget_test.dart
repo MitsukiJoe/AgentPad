@@ -16,7 +16,9 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
     await tester.pump();
     expect(find.text('发送'), findsNothing);
     final send = tester.widget<FilledButton>(
@@ -30,13 +32,17 @@ void main() {
       find.byKey(const ValueKey('text-input')),
     );
     expect(
-      (input.decoration?.enabledBorder as OutlineInputBorder?)?.borderSide.color,
+      (input.decoration?.enabledBorder as OutlineInputBorder?)
+          ?.borderSide
+          .color,
       const Color(0xFF5EAFF9),
     );
     expect(find.byKey(const ValueKey('input-height')), findsOneWidget);
     expect(
       tester.getCenter(find.byKey(const ValueKey('send-button'))).dx,
-      greaterThan(tester.getCenter(find.byKey(const ValueKey('text-input'))).dx),
+      greaterThan(
+        tester.getCenter(find.byKey(const ValueKey('text-input'))).dx,
+      ),
     );
     expect(
       tester.getCenter(find.byKey(const ValueKey('send-button'))).dy,
@@ -45,8 +51,12 @@ void main() {
       ),
     );
     expect(store.inputHeight, 'medium');
-    final mediumH = tester.getSize(find.byKey(const ValueKey('text-input'))).height;
-    final heightBtn = tester.getSize(find.byKey(const ValueKey('input-height')));
+    final mediumH = tester
+        .getSize(find.byKey(const ValueKey('text-input')))
+        .height;
+    final heightBtn = tester.getSize(
+      find.byKey(const ValueKey('input-height')),
+    );
     expect(heightBtn.width, heightBtn.height);
     await tester.enterText(
       find.byKey(const ValueKey('text-input')),
@@ -75,7 +85,9 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('input-height')));
     await tester.pump();
     expect(store.inputHeight, 'huge');
-    final hugeH = tester.getSize(find.byKey(const ValueKey('text-input'))).height;
+    final hugeH = tester
+        .getSize(find.byKey(const ValueKey('text-input')))
+        .height;
     expect(hugeH, greaterThan(mediumH + 50));
     expect(
       tester.getSize(find.byKey(const ValueKey('input-height'))),
@@ -107,73 +119,112 @@ void main() {
     expect(find.byKey(const ValueKey('home-pointer-mode')), findsOneWidget);
   });
 
-  testWidgets('home pointer quick switch hides mode bar but settings sync remains', (
+  testWidgets(
+    'home pointer quick switch hides mode bar but settings sync remains',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final store = PadStore();
+      await store.load();
+      await tester.pumpWidget(
+        AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+      );
+      expect(find.byKey(const ValueKey('home-pointer-mode')), findsOneWidget);
+
+      await tester.tap(find.byTooltip('设置'));
+      await tester.pumpAndSettle();
+      expect(find.text('跟外面同步'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('settings-pointer-mode-sync')),
+        findsOneWidget,
+      );
+      final sync = find.byKey(const ValueKey('settings-pointer-mode-sync'));
+      await tester.ensureVisible(sync);
+      await tester.tap(find.descendant(of: sync, matching: find.text('轨迹球')));
+      await tester.pumpAndSettle();
+      expect(store.pointerMode, 'trackball');
+
+      final quick = find.byKey(const ValueKey('home-pointer-quick-switch'));
+      await tester.ensureVisible(quick);
+      // Sticky close button can cover the top of the scroll body.
+      tester.widget<Switch>(quick).onChanged!(false);
+      await tester.pumpAndSettle();
+      expect(store.homePointerQuickSwitch, isFalse);
+      expect(
+        find.byKey(const ValueKey('settings-pointer-mode-sync')),
+        findsOneWidget,
+      );
+      expect(find.text('切换光标设备'), findsOneWidget);
+      expect(find.text('首页显示'), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('settings-close')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('home-pointer-mode')), findsNothing);
+      expect(find.byKey(const ValueKey('nub-panel')), findsOneWidget);
+    },
+  );
+
+  testWidgets('settings offers wheel and device strip controls', (
     tester,
   ) async {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
-    expect(find.byKey(const ValueKey('home-pointer-mode')), findsOneWidget);
-
-    await tester.tap(find.byTooltip('设置'));
-    await tester.pumpAndSettle();
-    expect(find.text('跟外面同步'), findsNothing);
-    expect(find.byKey(const ValueKey('settings-pointer-mode-sync')), findsOneWidget);
-    final sync = find.byKey(const ValueKey('settings-pointer-mode-sync'));
-    await tester.ensureVisible(sync);
-    await tester.tap(
-      find.descendant(of: sync, matching: find.text('轨迹球')),
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
     );
-    await tester.pumpAndSettle();
-    expect(store.pointerMode, 'trackball');
-
-    final quick = find.byKey(const ValueKey('home-pointer-quick-switch'));
-    await tester.ensureVisible(quick);
-    // Sticky close button can cover the top of the scroll body.
-    tester.widget<Switch>(quick).onChanged!(false);
-    await tester.pumpAndSettle();
-    expect(store.homePointerQuickSwitch, isFalse);
-    expect(find.byKey(const ValueKey('settings-pointer-mode-sync')), findsOneWidget);
-    expect(find.text('切换光标设备'), findsOneWidget);
-    expect(find.text('首页显示'), findsOneWidget);
-
-    await tester.tap(find.byKey(const ValueKey('settings-close')));
-    await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('home-pointer-mode')), findsNothing);
-    expect(find.byKey(const ValueKey('nub-panel')), findsOneWidget);
-  });
-
-  testWidgets('settings offers a shared wheel side', (tester) async {
-    SharedPreferences.setMockInitialValues({});
-    final store = PadStore();
-    await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
     await tester.tap(find.byTooltip('设置'));
     await tester.pumpAndSettle();
     expect(find.text('滚轮位置'), findsOneWidget);
+    expect(find.text('滚轮方向反转'), findsOneWidget);
+    expect(find.text('已连接设备的快捷开关显示在什么地方'), findsOneWidget);
+    expect(find.text('输入框下方'), findsOneWidget);
+    expect(find.text('顶部'), findsOneWidget);
     expect(find.text('左侧'), findsOneWidget);
     expect(find.text('右侧'), findsOneWidget);
     expect(find.text('切换光标设备'), findsOneWidget);
     expect(find.text('首页显示'), findsOneWidget);
     expect(find.text('首页快速切换光标设备'), findsNothing);
     expect(find.text('跟外面同步'), findsNothing);
-    expect(find.byKey(const ValueKey('home-pointer-quick-switch')), findsOneWidget);
-    expect(find.byKey(const ValueKey('settings-pointer-mode-sync')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('home-pointer-quick-switch')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('settings-pointer-mode-sync')),
+      findsOneWidget,
+    );
     expect(find.text('触控板大小'), findsOneWidget);
     expect(find.text('小'), findsOneWidget);
     expect(find.text('中'), findsOneWidget);
     expect(find.text('大'), findsOneWidget);
     expect(find.text('指针速度'), findsOneWidget);
     expect(find.text('滚轮速度'), findsOneWidget);
-    expect(find.text('×1'), findsOneWidget);
-    expect(find.text('×2'), findsOneWidget);
-    expect(find.text('×4'), findsNWidgets(2));
-    expect(find.text('×16'), findsOneWidget);
-    expect(find.text('×28'), findsOneWidget);
+    expect(find.text('×1'), findsWidgets);
+    expect(find.text('×2'), findsWidgets);
+    expect(find.text('×4'), findsWidgets);
+    expect(find.text('×16'), findsWidgets);
+    expect(find.text('×7'), findsWidgets);
+    expect(find.text('×28'), findsWidgets);
     expect(find.text('×9'), findsNothing);
-    expect(store.pointerSpeed, 2);
-    expect(store.wheelSpeed, 16);
+    expect(store.pointerSpeedWindows, 3);
+    expect(store.pointerSpeedMac, 3);
+    expect(store.wheelSpeedWindows, 1);
+    expect(store.wheelSpeedMac, 16);
+    expect(store.wheelReverseWindows, isFalse);
+    expect(store.wheelReverseMac, isFalse);
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('wheel-reverse-windows')),
+    );
+    tester
+        .widget<Switch>(
+          find.descendant(
+            of: find.byKey(const ValueKey('wheel-reverse-windows')),
+            matching: find.byType(Switch),
+          ),
+        )
+        .onChanged!(true);
+    await tester.pumpAndSettle();
+    expect(store.wheelReverseWindows, isTrue);
     expect(find.text('指针发送频率'), findsOneWidget);
     expect(find.text('60Hz'), findsOneWidget);
     expect(find.text('120Hz'), findsOneWidget);
@@ -181,8 +232,10 @@ void main() {
     expect(store.pointerHz, 60);
     expect(find.text('语音自动发送延迟'), findsOneWidget);
     expect(find.text('横屏布局'), findsOneWidget);
-    // Settings order after theme: voice → pointer mode → wheel → pad size →
-    // speeds → hz → landscape.
+    expect(find.text('强制横屏'), findsOneWidget);
+    expect(find.byKey(const ValueKey('force-landscape')), findsOneWidget);
+    // Settings order after theme: device strip → voice → pointer mode →
+    // pad size → wheel → speeds → hz → landscape → force landscape.
     Future<void> expectAbove(String upper, String lower) async {
       await tester.ensureVisible(find.text(upper));
       await tester.ensureVisible(find.text(lower));
@@ -192,43 +245,47 @@ void main() {
       );
     }
 
+    await expectAbove('已连接设备的快捷开关显示在什么地方', '语音自动发送延迟');
     await expectAbove('语音自动发送延迟', '切换光标设备');
-    await expectAbove('切换光标设备', '滚轮位置');
-    await expectAbove('滚轮位置', '触控板大小');
-    await expectAbove('触控板大小', '指针速度');
+    await expectAbove('切换光标设备', '触控板大小');
+    await expectAbove('触控板大小', '滚轮位置');
+    await expectAbove('滚轮位置', '滚轮方向反转');
+    await expectAbove('滚轮方向反转', '指针速度');
     await expectAbove('指针速度', '滚轮速度');
     await expectAbove('滚轮速度', '指针发送频率');
     await expectAbove('指针发送频率', '横屏布局');
+    await expectAbove('横屏布局', '强制横屏');
     await tester.dragUntilVisible(
-      find.byKey(const ValueKey('pointer-speed')),
+      find.byKey(const ValueKey('pointer-speed-windows')),
       find.byKey(const ValueKey('settings-scroll')),
       const Offset(0, -80),
     );
     tester
         .widget<Slider>(
           find.descendant(
-            of: find.byKey(const ValueKey('pointer-speed')),
+            of: find.byKey(const ValueKey('pointer-speed-windows')),
             matching: find.byType(Slider),
           ),
         )
-        .onChanged!(2);
+        .onChanged!(4);
     await tester.pumpAndSettle();
-    expect(store.pointerSpeed, 3);
+    expect(store.pointerSpeedWindows, 5);
+    expect(store.pointerSpeedMac, 3);
     await tester.dragUntilVisible(
-      find.byKey(const ValueKey('wheel-speed')),
+      find.byKey(const ValueKey('wheel-speed-windows')),
       find.byKey(const ValueKey('settings-scroll')),
       const Offset(0, -80),
     );
     tester
         .widget<Slider>(
           find.descendant(
-            of: find.byKey(const ValueKey('wheel-speed')),
+            of: find.byKey(const ValueKey('wheel-speed-windows')),
             matching: find.byType(Slider),
           ),
         )
         .onChanged!(6);
     await tester.pumpAndSettle();
-    expect(store.wheelSpeed, 28);
+    expect(store.wheelSpeedWindows, 7);
     await tester.dragUntilVisible(
       find.byKey(const ValueKey('pointer-hz')),
       find.byKey(const ValueKey('settings-scroll')),
@@ -259,7 +316,9 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.display.resetSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
     await tester.tap(find.byTooltip('设置'));
     await tester.pumpAndSettle();
 
@@ -284,7 +343,9 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
 
     final pointerBottom = tester
         .getBottomLeft(find.byKey(const ValueKey('pointer-area')))
@@ -360,7 +421,9 @@ void main() {
       SharedPreferences.setMockInitialValues({});
       final store = PadStore();
       await store.load();
-      await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+      await tester.pumpWidget(
+        AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+      );
       await tester.tap(find.byTooltip('设置'));
       await tester.pumpAndSettle();
 
@@ -435,7 +498,9 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
     final app = tester.widget<MaterialApp>(find.byType(MaterialApp));
     final light = app.theme!;
     final dark = app.darkTheme!;
@@ -484,11 +549,13 @@ void main() {
       SharedPreferences.setMockInitialValues({'theme_color': color});
       final store = PadStore();
       await store.load();
-      await tester.pumpWidget(AgentPadApp(
-        key: ValueKey(color),
-        store: store,
-        enableAutomaticUpdateChecks: false,
-      ));
+      await tester.pumpWidget(
+        AgentPadApp(
+          key: ValueKey(color),
+          store: store,
+          enableAutomaticUpdateChecks: false,
+        ),
+      );
       final app = tester.widget<MaterialApp>(find.byType(MaterialApp));
       expectedLight ??= app.theme?.colorScheme;
       expectedDark ??= app.darkTheme?.colorScheme;
@@ -540,7 +607,9 @@ void main() {
     });
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
     final app = tester.widget<MaterialApp>(find.byType(MaterialApp));
     final send = tester.widget<FilledButton>(
       find.byKey(const ValueKey('send-button')),
@@ -563,14 +632,18 @@ void main() {
     });
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
     final redSend = tester.widget<FilledButton>(
       find.byKey(const ValueKey('send-button')),
     );
     expect(redSend.style?.foregroundColor?.resolve({}), Colors.white);
 
     store.themeColor = 'blue';
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
     await tester.pump();
     final blueSend = tester.widget<FilledButton>(
       find.byKey(const ValueKey('send-button')),
@@ -587,7 +660,9 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     addTearDown(tester.view.resetViewInsets);
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
     expect(
       tester.getSize(find.byKey(const ValueKey('pointer-area'))).height,
       240,
@@ -603,7 +678,9 @@ void main() {
     await tester.ensureVisible(find.text('轨迹球'));
     await tester.tap(find.text('轨迹球'));
     await tester.pump();
-    final ballH = tester.getSize(find.byKey(const ValueKey('pointer-area'))).height;
+    final ballH = tester
+        .getSize(find.byKey(const ValueKey('pointer-area')))
+        .height;
     expect(ballH, lessThan(140));
     expect(ballH, greaterThan(80));
     expect(
@@ -612,7 +689,9 @@ void main() {
     );
 
     store.pointerSize = 'small';
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
     await tester.pump();
     await tester.tap(find.text('轨迹球'));
     await tester.pump();
@@ -646,7 +725,9 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
     SingleChildScrollView page() =>
         tester.widget(find.byKey(const ValueKey('page-scroll')));
     expect(page().physics, isNot(isA<NeverScrollableScrollPhysics>()));
@@ -666,7 +747,9 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
     final gesture = await tester.startGesture(
       tester.getCenter(find.byKey(const ValueKey('pointer-input'))),
     );
@@ -674,6 +757,83 @@ void main() {
     await gesture.moveBy(const Offset(20, 0));
     expect(tester.binding.transientCallbackCount, 0);
     await gesture.up();
+  });
+
+  testWidgets('pointer speed is scaled per connected platform', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final store = PadStore()
+      ..pointerSpeedWindows = 2
+      ..pointerSpeedMac = 5
+      ..devices = [
+        Device(
+          deviceId: 'win',
+          name: 'Win',
+          ips: const ['127.0.0.1'],
+          port: 9618,
+          os: 'Windows 11',
+        ),
+        Device(
+          deviceId: 'mac',
+          name: 'Mac',
+          ips: const ['127.0.0.2'],
+          port: 9618,
+          os: 'macOS',
+        ),
+      ];
+
+    const ws = MethodChannel('agentpad/ws');
+    const events = MethodChannel('agentpad/ws_events');
+    final pointerCalls = <Map>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(ws, (
+      call,
+    ) async {
+      if (call.method == 'connect') return true;
+      if (call.method == 'pointer') {
+        pointerCalls.add((call.arguments as Map).cast<String, dynamic>());
+        return true;
+      }
+      if (call.method == 'send') return true;
+      if (call.method == 'displayRefreshHz') return 60.0;
+      if (call.method == 'close') return true;
+      if (call.method == 'resetVoiceEvidence') return true;
+      return null;
+    });
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      events,
+      (_) async => null,
+    );
+    addTearDown(() {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(ws, null);
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        events,
+        null,
+      );
+    });
+
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byKey(const ValueKey('pointer-input'))),
+    );
+    await tester.pump();
+    await gesture.moveBy(const Offset(4, 0));
+    await tester.pump(const Duration(milliseconds: 20));
+    await gesture.up();
+    await tester.pump();
+
+    final moves = pointerCalls.where((call) => call['dx'] != 0).toList();
+    expect(
+      moves,
+      containsAll([containsPair('id', 'win'), containsPair('id', 'mac')]),
+    );
+    expect(moves.firstWhere((call) => call['id'] == 'win')['dx'], 8);
+    expect(moves.firstWhere((call) => call['id'] == 'mac')['dx'], 20);
+
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 
   testWidgets('home modules share one horizontal page gutter', (tester) async {
@@ -684,7 +844,9 @@ void main() {
     tester.view.devicePixelRatio = 3;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
     await tester.pump();
     final actionLeft = tester
         .getTopLeft(find.byKey(const ValueKey('action-voice-auto-send')))
@@ -692,13 +854,18 @@ void main() {
     final padLeft = tester
         .getTopLeft(find.byKey(const ValueKey('touchpad-surface')))
         .dx;
-    final inputLeft = tester
-        .getTopLeft(find.byKey(const ValueKey('text-input')))
-        .dx;
+    final input = tester.getRect(find.byKey(const ValueKey('text-input')));
+    final inputLeft = input.left;
+    final wheel = tester.getRect(find.byKey(const ValueKey('touchpad-wheel')));
+    final sendButton = tester.getRect(
+      find.byKey(const ValueKey('send-button')),
+    );
     final modeLeft = tester.getTopLeft(find.text('触控板')).dx;
     expect(actionLeft, 12);
     expect(padLeft, actionLeft);
     expect(inputLeft, actionLeft);
+    expect(wheel.width, sendButton.width);
+    expect(wheel.right, sendButton.right);
     expect(modeLeft, greaterThanOrEqualTo(actionLeft));
   });
 
@@ -764,7 +931,9 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
     SingleChildScrollView page() =>
         tester.widget(find.byKey(const ValueKey('page-scroll')));
     final center = tester.getCenter(
@@ -796,7 +965,9 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
     await tester.pump();
 
     final vertical = find.descendant(
@@ -825,7 +996,9 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
     expect(find.text('撤回上次输入'), findsOneWidget);
     expect(find.text('电脑自动回车'), findsOneWidget);
     expect(find.text('语音自动发送'), findsOneWidget);
@@ -843,7 +1016,10 @@ void main() {
     BoxDecoration deco(Finder f) =>
         tester
                 .widget<AnimatedContainer>(
-                  find.descendant(of: f, matching: find.byType(AnimatedContainer)),
+                  find.descendant(
+                    of: f,
+                    matching: find.byType(AnimatedContainer),
+                  ),
                 )
                 .decoration
             as BoxDecoration;
@@ -854,15 +1030,26 @@ void main() {
     expect(deco(voice).boxShadow, isNotNull);
     expect(deco(voice).boxShadow!.first.blurRadius, 5);
     expect(deco(voice).boxShadow!.first.offset, Offset.zero);
-    expect(tester.getSize(find.descendant(of: voice, matching: find.byType(AnimatedContainer))).height, 34);
+    expect(
+      tester
+          .getSize(
+            find.descendant(
+              of: voice,
+              matching: find.byType(AnimatedContainer),
+            ),
+          )
+          .height,
+      34,
+    );
     expect(deco(enter).color, const Color(0xFFD1D0CC));
     expect(deco(enter).border?.top.color, const Color(0xFFBCBAB7));
     expect(deco(enter).boxShadow, isNull);
     expect(deco(undo).color, const Color(0xFFF0F0F0));
     expect(deco(undo).border?.top.color, const Color(0xFFBCBAB7));
     expect(deco(undo).boxShadow, isNull);
-    TextStyle labelStyle(Finder f) =>
-        tester.widget<Text>(find.descendant(of: f, matching: find.byType(Text))).style!;
+    TextStyle labelStyle(Finder f) => tester
+        .widget<Text>(find.descendant(of: f, matching: find.byType(Text)))
+        .style!;
     expect(labelStyle(voice).fontWeight, FontWeight.w700);
     expect(labelStyle(voice).color, const Color(0xFF141414));
     expect(labelStyle(enter).fontWeight, FontWeight.w700);
@@ -881,7 +1068,9 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
     final button = tester.widget<TextButton>(
       find.byKey(const ValueKey('connection-status')),
     );
@@ -907,7 +1096,9 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
     expect(
       find.text(
         '单指：单击左键 / 长按拖动区选 / 长按松开右键\n'
@@ -917,11 +1108,133 @@ void main() {
     );
   });
 
+  testWidgets('wheel strip sends each half pixel at the Mac multiplier', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    final store = PadStore()
+      ..devices = [
+        Device(
+          deviceId: 'mac', name: 'Mac', ips: ['127.0.0.1'],
+          port: 9618, os: 'macos',
+        ),
+      ];
+    const ws = MethodChannel('agentpad/ws');
+    const events = MethodChannel('agentpad/ws_events');
+    final packets = <Map>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(ws, (
+      call,
+    ) async {
+      if (call.method == 'pointer') packets.add(call.arguments as Map);
+      if (call.method == 'connect' || call.method == 'send') return true;
+      return null;
+    });
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      events, (_) async => null,
+    );
+    addTearDown(() {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(ws, null);
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(events, null);
+    });
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('已连接 1 台'), findsOneWidget);
+    final wheel = await tester.startGesture(
+      tester.getCenter(find.byKey(const ValueKey('touchpad-wheel'))),
+      pointer: 1,
+    );
+    for (var i = 0; i < 2; i++) {
+      await wheel.moveBy(const Offset(0, 0.5));
+      final tap = await tester.startGesture(
+        tester.getCenter(find.byKey(const ValueKey('touchpad-surface'))),
+        pointer: 2,
+      );
+      await tap.up();
+      await tester.pump();
+      expect(
+        packets.fold<int>(0, (sum, p) => sum + (p['wheel'] as int)),
+        -8 * (i + 1),
+      );
+    }
+    await wheel.up();
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('long press haptic fires when armed and honors the setting', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    final store = PadStore();
+    final haptics = <MethodCall>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'HapticFeedback.vibrate') haptics.add(call);
+        return null;
+      },
+    );
+    addTearDown(() {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      );
+    });
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
+    for (final enabled in [true, false]) {
+      store.longPressHaptic = enabled;
+      haptics.clear();
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.byKey(const ValueKey('touchpad-surface'))),
+      );
+      await tester.pump(const Duration(milliseconds: 600));
+      expect(haptics.length, enabled ? 1 : 0);
+      await gesture.up();
+      await tester.pump();
+    }
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('long press haptic setting toggles from settings', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    final store = PadStore();
+    await store.load();
+    expect(store.longPressHaptic, isTrue);
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
+
+    await tester.tap(find.byTooltip('设置'));
+    await tester.pumpAndSettle();
+    await tester.dragUntilVisible(
+      find.byKey(const ValueKey('long-press-haptic')),
+      find.byKey(const ValueKey('settings-scroll')),
+      const Offset(0, -80),
+    );
+    await tester.drag(
+      find.byKey(const ValueKey('settings-scroll')),
+      const Offset(0, 120),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('长按轻震反馈'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('long-press-haptic')));
+    await tester.pump();
+    expect(store.longPressHaptic, isFalse);
+  });
+
   testWidgets('voice delay and help live in settings', (tester) async {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
 
     await tester.longPress(find.text('语音自动发送'));
     await tester.pumpAndSettle();
@@ -958,7 +1271,9 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
     expect(find.text('长按设备可删除，拖动可排序'), findsNothing);
     await tester.tap(find.byKey(const ValueKey('connection-status')));
     await tester.pumpAndSettle();
@@ -971,7 +1286,9 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final empty = PadStore();
     await empty.load();
-    await tester.pumpWidget(AgentPadApp(store: empty, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: empty, enableAutomaticUpdateChecks: false),
+    );
     expect(find.text('未连接'), findsOneWidget);
     expect(
       find.byKey(const ValueKey('connection-icon-disconnected')),
@@ -988,7 +1305,9 @@ void main() {
       ..devices = [
         Device(deviceId: 'a', name: 'Mac', ips: const [], port: 9618),
       ];
-    await tester.pumpWidget(AgentPadApp(store: saved, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: saved, enableAutomaticUpdateChecks: false),
+    );
     await tester.pump();
     expect(find.text('连接中'), findsOneWidget);
     expect(
@@ -1012,7 +1331,9 @@ void main() {
         Device(deviceId: 'a', name: 'Mac', ips: const [], port: 9618),
         Device(deviceId: 'b', name: 'PC', ips: const [], port: 9618),
       ];
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
     await tester.pump();
 
     final strip = tester.widget<ListView>(
@@ -1023,7 +1344,9 @@ void main() {
     expect(find.text('PC'), findsOneWidget);
     expect(
       tester.getTopLeft(find.byKey(const ValueKey('device-strip'))).dy,
-      greaterThan(tester.getBottomLeft(find.byKey(const ValueKey('text-input'))).dy),
+      greaterThan(
+        tester.getBottomLeft(find.byKey(const ValueKey('text-input'))).dy,
+      ),
     );
     final capsule = find.byKey(const ValueKey('device-capsule-a'));
     expect(capsule, findsOneWidget);
@@ -1125,11 +1448,74 @@ void main() {
     await tester.pump(const Duration(seconds: 2));
   });
 
+  testWidgets('device strip can move into the top bar', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    tester.view.physicalSize = const Size(600, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final store = PadStore()
+      ..deviceStripPlacement = 'top'
+      ..devices = [
+        Device(deviceId: 'a', name: 'Mac', ips: const [], port: 9618),
+        Device(deviceId: 'b', name: 'PC', ips: const [], port: 9618),
+      ];
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
+    await tester.pump();
+
+    expect(find.text('未连接'), findsNothing);
+    expect(find.text('连接中'), findsNothing);
+    expect(find.text('已连接 0 台'), findsNothing);
+    expect(find.text('0'), findsOneWidget);
+    final strip = tester.widget<ListView>(
+      find.byKey(const ValueKey('device-strip')),
+    );
+    expect(strip.clipBehavior, Clip.none);
+    expect(strip.padding, const EdgeInsets.symmetric(horizontal: 10));
+    final horizontalClip = tester.widget<ClipRect>(
+      find.byKey(const ValueKey('device-strip-horizontal-clip')),
+    );
+    expect(
+      horizontalClip.clipper?.getClip(const Size(100, 48)),
+      const Rect.fromLTRB(1, -32, 99, 80),
+    );
+    expect(
+      find.byKey(const ValueKey('device-strip-edge-fade')),
+      findsOneWidget,
+    );
+    final stripRect = tester.getRect(
+      find.byKey(const ValueKey('device-strip')),
+    );
+    final statusRect = tester.getRect(
+      find.byKey(const ValueKey('connection-status')),
+    );
+    final inputRect = tester.getRect(find.byKey(const ValueKey('text-input')));
+    final aboutRect = tester.getRect(find.byTooltip('关于'));
+    final capsuleBodyRect = tester.getRect(
+      find.descendant(
+        of: find.byKey(const ValueKey('device-capsule-a')),
+        matching: find.byType(AnimatedContainer),
+      ),
+    );
+    expect(stripRect.height, 48);
+    expect(capsuleBodyRect.top - stripRect.top, greaterThanOrEqualTo(5));
+    expect(stripRect.bottom - capsuleBodyRect.bottom, greaterThanOrEqualTo(5));
+    expect(stripRect.top, lessThan(inputRect.top));
+    expect(stripRect.left, greaterThan(statusRect.right));
+    expect(stripRect.right, lessThanOrEqualTo(aboutRect.left));
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump(const Duration(seconds: 2));
+  });
+
   testWidgets('dark nub uses one wheel-colored bordered panel', (tester) async {
     SharedPreferences.setMockInitialValues({'theme': 'dark'});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
     await tester.tap(find.text('轨迹球'));
     await tester.pump();
 
@@ -1149,7 +1535,9 @@ void main() {
       ..devices = [
         Device(deviceId: 'a', name: 'Mac', ips: const [], port: 9618),
       ];
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
     await tester.tap(find.byKey(const ValueKey('connection-status')));
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('device-drag-a')), findsOneWidget);
@@ -1164,7 +1552,9 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
     expect(
       tester.getCenter(find.byTooltip('关于')).dx,
       lessThan(tester.getCenter(find.byTooltip('设置')).dx),
@@ -1235,7 +1625,9 @@ void main() {
       );
     });
 
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
     await tester.pump();
     await tester.pump();
     expect(find.text('已连接 1 台'), findsOneWidget);
@@ -1277,6 +1669,135 @@ void main() {
     expect(textSends, 2);
   });
 
+  testWidgets('empty input backspace is forwarded to selected computers', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    final store = PadStore();
+    await store.load();
+    store.voiceAutoSend = false;
+    store.devices = [
+      Device(deviceId: 'pc', name: 'PC', ips: ['127.0.0.1'], port: 9618),
+    ];
+
+    const ws = MethodChannel('agentpad/ws');
+    const events = MethodChannel('agentpad/ws_events');
+    final sent = <Map>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(ws, (
+      call,
+    ) async {
+      if (call.method == 'connect') return true;
+      if (call.method == 'send') {
+        final raw = (call.arguments as Map)['text'] as String;
+        sent.add((jsonDecode(raw) as Map).cast<String, dynamic>());
+        return true;
+      }
+      if (call.method == 'close') return true;
+      return null;
+    });
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      events,
+      (_) async => null,
+    );
+    addTearDown(() {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(ws, null);
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        events,
+        null,
+      );
+    });
+
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
+    await tester.pump();
+    await tester.pump();
+    sent.clear();
+    await tester.tap(find.byType(TextField));
+    await tester.pump();
+
+    const codec = StandardMethodCodec();
+    ServicesBinding.instance.channelBuffers.push(
+      'agentpad/ws_events',
+      codec.encodeSuccessEnvelope({'event': 'inputBackspace'}),
+      (_) {},
+    );
+    await tester.pump();
+    expect(sent, [
+      {'type': 'key', 'key': 'Backspace', 'modifiers': <dynamic>[]},
+    ]);
+
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: 'a',
+        selection: TextSelection.collapsed(offset: 1),
+      ),
+    );
+    await tester.pump();
+    ServicesBinding.instance.channelBuffers.push(
+      'agentpad/ws_events',
+      codec.encodeSuccessEnvelope({'event': 'inputBackspace'}),
+      (_) {},
+    );
+    await tester.pump();
+    expect(sent.length, 1);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.backspace);
+    await tester.pump();
+    expect(
+      tester.widget<TextField>(find.byKey(const ValueKey('text-input')))
+          .controller!.text,
+      isEmpty,
+    );
+    expect(sent.length, 1);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.backspace);
+    await tester.sendKeyRepeatEvent(LogicalKeyboardKey.backspace);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.backspace);
+    await tester.pump();
+    expect(sent.length, 3);
+
+    // A stale IME delete right after send-and-clear must not reach the PC.
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: 'hi',
+        selection: TextSelection.collapsed(offset: 2),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('send-button')));
+    await tester.pump();
+    expect(sent.length, 4);
+    expect(sent.last['type'], 'text');
+    ServicesBinding.instance.channelBuffers.push(
+      'agentpad/ws_events',
+      codec.encodeSuccessEnvelope({'event': 'inputBackspace'}),
+      (_) {},
+    );
+    await tester.pump();
+    expect(sent.length, 4);
+    await tester.pump(const Duration(seconds: 1));
+    ServicesBinding.instance.channelBuffers.push(
+      'agentpad/ws_events',
+      codec.encodeSuccessEnvelope({'event': 'inputBackspace'}),
+      (_) {},
+    );
+    await tester.pump();
+    expect(sent.length, 5);
+    expect(sent.last['key'], 'Backspace');
+
+    await tester.tap(find.byTooltip('设置'));
+    await tester.pumpAndSettle();
+    ServicesBinding.instance.channelBuffers.push(
+      'agentpad/ws_events',
+      codec.encodeSuccessEnvelope({'event': 'inputBackspace'}),
+      (_) {},
+    );
+    await tester.pump();
+    expect(sent.length, 5);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('keyboard open does not overflow', (tester) async {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
@@ -1287,7 +1808,9 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     addTearDown(tester.view.resetViewInsets);
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
     await tester.pump();
     expect(find.byKey(const ValueKey('send-button')), findsOneWidget);
     expect(tester.takeException(), isNull);
@@ -1305,12 +1828,77 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.display.resetSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
     await tester.pump();
 
     expect(find.byKey(const ValueKey('landscape-pointer-pane')), findsNothing);
     expect(find.byKey(const ValueKey('page-scroll')), findsOneWidget);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('force landscape waits for the real viewport to rotate', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    final store = PadStore()..forceLandscape = true;
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.display.size = const Size(1080, 2400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.display.resetSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey('landscape-pointer-pane')),
+      findsNothing,
+    );
+    expect(find.byKey(const ValueKey('landscape-input-pane')), findsNothing);
+    expect(find.byKey(const ValueKey('page-scroll')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+
+    tester.view.physicalSize = const Size(844, 390);
+    tester.view.display.size = const Size(2400, 1080);
+    await tester.pump();
+    expect(find.byKey(const ValueKey('landscape-input-pane')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('small landscape windows and large text fall back to one column', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    tester.view.devicePixelRatio = 1;
+    tester.view.display.size = const Size(2400, 1080);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.display.resetSize);
+    addTearDown(tester.view.resetViewInsets);
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    for (final scenario in [
+      (const Size(500, 360), 0.0, 1.0, 'medium'),
+      (const Size(640, 360), 200.0, 1.0, 'medium'),
+      (const Size(844, 390), 0.0, 1.6, 'medium'),
+      (const Size(640, 360), 0.0, 1.0, 'huge'),
+    ]) {
+      tester.view.physicalSize = scenario.$1;
+      tester.view.viewInsets = FakeViewPadding(bottom: scenario.$2);
+      tester.platformDispatcher.textScaleFactorTestValue = scenario.$3;
+      final store = PadStore()..inputHeight = scenario.$4;
+      await tester.pumpWidget(
+        AgentPadApp(
+          key: UniqueKey(), store: store, enableAutomaticUpdateChecks: false,
+        ),
+      );
+      await tester.pump();
+      expect(find.byKey(const ValueKey('landscape-input-pane')), findsNothing);
+      expect(tester.takeException(), isNull);
+    }
   });
 
   testWidgets(
@@ -1330,7 +1918,9 @@ void main() {
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.display.resetSize);
       addTearDown(tester.view.resetDevicePixelRatio);
-      await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+      await tester.pumpWidget(
+        AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+      );
       await tester.pump();
 
       final pointerPane = find.byKey(const ValueKey('landscape-pointer-pane'));
@@ -1339,7 +1929,7 @@ void main() {
       expect(inputPane, findsOneWidget);
       expect(
         tester.getCenter(pointerPane).dx,
-        lessThan(tester.getCenter(inputPane).dx),
+        greaterThan(tester.getCenter(inputPane).dx),
       );
       expect(
         tester.getSize(pointerPane).width,
@@ -1378,7 +1968,10 @@ void main() {
       final pointerTop = tester
           .getTopLeft(find.byKey(const ValueKey('pointer-area')))
           .dy;
-      await tester.dragFrom(const Offset(5, 300), const Offset(0, -120));
+      await tester.dragFrom(
+        tester.getCenter(pointerPane),
+        const Offset(0, -120),
+      );
       await tester.pumpAndSettle();
       expect(
         tester.getTopLeft(find.byKey(const ValueKey('pointer-area'))).dy,
@@ -1401,7 +1994,9 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.display.resetSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
     await tester.pump();
 
     await tester.tap(find.byTooltip('设置'));
@@ -1412,9 +2007,10 @@ void main() {
     expect(setting, findsOneWidget);
     await tester.ensureVisible(setting);
     await tester.pumpAndSettle();
-    await tester.tap(find.descendant(of: setting, matching: find.text('触控在右')));
-    await tester.pumpAndSettle();
     expect(store.landscapePointerSide, 'right');
+    await tester.tap(find.descendant(of: setting, matching: find.text('触控在左')));
+    await tester.pumpAndSettle();
+    expect(store.landscapePointerSide, 'left');
     tester.state<NavigatorState>(find.byType(Navigator)).pop();
     await tester.pumpAndSettle();
 
@@ -1422,7 +2018,7 @@ void main() {
     final inputPane = find.byKey(const ValueKey('landscape-input-pane'));
     expect(
       tester.getCenter(pointerPane).dx,
-      greaterThan(tester.getCenter(inputPane).dx),
+      lessThan(tester.getCenter(inputPane).dx),
     );
     expect(tester.getSize(pointerPane).width, tester.getSize(inputPane).width);
     expect(tester.takeException(), isNull);
@@ -1434,7 +2030,9 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
     await store.load();
-    await tester.pumpWidget(AgentPadApp(store: store, enableAutomaticUpdateChecks: false));
+    await tester.pumpWidget(
+      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+    );
     await tester.pump();
 
     final dynamic home = tester.state(find.byType(HomePage));

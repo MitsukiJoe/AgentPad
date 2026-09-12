@@ -25,6 +25,12 @@ void main() {
 
     p.add(2, 3, 0, 1);
     expect(p.tick(), {'dx': 2, 'dy': 3, 'buttons': 0, 'wheel': 1});
+
+    p.add(0, 0, 0, 0.25);
+    p.add(0, 0, 0, 0.25);
+    expect(p.tick()!['wheel'], 0.5);
+    p.add(0, 0, 0, -0.25);
+    expect(p.tick()!['wheel'], -0.25);
   });
 
   test(

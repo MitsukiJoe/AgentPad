@@ -18,13 +18,27 @@ use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use crate::{button_edges, Error};
 
 const POINTER_BURST_GAP: Duration = Duration::from_millis(100);
+const CLICK_GAP: Duration = Duration::from_millis(500);
+const CLICK_DISTANCE_SQUARED: f64 = 25.0;
 static POINTER_TARGET: Mutex<Option<PointerTarget>> = Mutex::new(None);
+static CLICK_TRACKER: Mutex<Option<ClickTracker>> = Mutex::new(None);
 
 #[derive(Clone, Copy)]
 struct PointerTarget {
     position: CGPoint,
     updated_at: Instant,
     bounds: Option<CGRect>,
+}
+
+#[derive(Clone, Copy)]
+struct ClickTracker {
+    bit: u8,
+    count: i64,
+    position: CGPoint,
+    updated_at: Instant,
+    active_bit: u8,
+    active_count: i64,
+    dragged: bool,
 }
 
 impl PointerTarget {
@@ -324,6 +338,84 @@ fn pointer_position(dx: i32, dy: i32) -> Result<CGPoint, Error> {
     Ok(next.position)
 }
 
+fn click_close_enough(a: CGPoint, b: CGPoint) -> bool {
+    let dx = a.x - b.x;
+    let dy = a.y - b.y;
+    dx * dx + dy * dy <= CLICK_DISTANCE_SQUARED
+}
+
+fn click_count_for_down(bit: u8, position: CGPoint) -> i64 {
+    let now = Instant::now();
+    let mut tracker = CLICK_TRACKER.lock().unwrap_or_else(|e| e.into_inner());
+    let count = match *tracker {
+        Some(prev)
+            if prev.bit == bit
+                && now.duration_since(prev.updated_at) <= CLICK_GAP
+                && click_close_enough(prev.position, position) =>
+        {
+            (prev.count + 1).min(3)
+        }
+        _ => 1,
+    };
+    *tracker = Some(ClickTracker {
+        bit,
+        count,
+        position,
+        updated_at: now,
+        active_bit: bit,
+        active_count: count,
+        dragged: false,
+    });
+    count
+}
+
+fn click_count_for_up(bit: u8) -> i64 {
+    let now = Instant::now();
+    let mut tracker = CLICK_TRACKER.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(mut current) = *tracker else {
+        return 1;
+    };
+    if current.active_bit != bit {
+        return current.count.max(1);
+    }
+    let count = current.active_count.max(1);
+    if current.dragged {
+        *tracker = None;
+    } else {
+        current.updated_at = now;
+        current.active_bit = 0;
+        current.active_count = 0;
+        *tracker = Some(current);
+    }
+    count
+}
+
+fn active_click_count(buttons: u8) -> i64 {
+    let tracker = CLICK_TRACKER.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(current) = *tracker else {
+        return 1;
+    };
+    if current.active_bit != 0 && buttons & current.active_bit != 0 {
+        current.active_count.max(1)
+    } else {
+        1
+    }
+}
+
+fn note_drag(buttons: u8) {
+    let mut tracker = CLICK_TRACKER.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(mut current) = *tracker {
+        if current.active_bit != 0 && buttons & current.active_bit != 0 {
+            current.dragged = true;
+            *tracker = Some(current);
+        }
+    }
+}
+
+fn set_click_count(ev: &CGEvent, count: i64) {
+    ev.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, count);
+}
+
 pub(crate) fn inject_pointer(
     dx: i32,
     dy: i32,
@@ -353,6 +445,10 @@ fn inject_pointer_raw(dx: i32, dy: i32, prev: u8, buttons: u8, wheel: i32) -> Re
         };
         let ev = CGEvent::new_mouse_event(src.clone(), ty, pos, CGMouseButton::Left)
             .map_err(|_| Error)?;
+        if buttons != 0 {
+            set_click_count(&ev, active_click_count(buttons));
+            note_drag(buttons);
+        }
         ev.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_X, i64::from(dx));
         ev.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y, i64::from(dy));
         post_move(&ev);
@@ -380,10 +476,12 @@ fn inject_pointer_raw(dx: i32, dy: i32, prev: u8, buttons: u8, wheel: i32) -> Re
     ] {
         if downs & bit != 0 {
             let ev = CGEvent::new_mouse_event(src.clone(), down_ty, pos, btn).map_err(|_| Error)?;
+            set_click_count(&ev, click_count_for_down(bit, pos));
             post(&ev);
         }
         if ups & bit != 0 {
             let ev = CGEvent::new_mouse_event(src.clone(), up_ty, pos, btn).map_err(|_| Error)?;
+            set_click_count(&ev, click_count_for_up(bit));
             post(&ev);
         }
     }
@@ -400,6 +498,8 @@ fn inject_pointer_raw(dx: i32, dy: i32, prev: u8, buttons: u8, wheel: i32) -> Re
 mod tests {
     use super::*;
 
+    static CLICK_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn named_keycodes() {
         assert_eq!(keycode("Escape"), Some(KeyCode::ESCAPE));
@@ -414,6 +514,32 @@ mod tests {
         assert!(s.contains("ax="), "{s}");
         assert!(s.contains("exe="), "{s}");
         assert!(!s.contains("resp="), "{s}");
+    }
+
+    #[test]
+    fn click_count_tracks_double_and_triple_clicks() {
+        let _guard = CLICK_TEST_LOCK.lock().unwrap();
+        let pos = CGPoint::new(20.0, 40.0);
+        *CLICK_TRACKER.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+        assert_eq!(click_count_for_down(1, pos), 1);
+        assert_eq!(click_count_for_up(1), 1);
+        assert_eq!(click_count_for_down(1, pos), 2);
+        assert_eq!(click_count_for_up(1), 2);
+        assert_eq!(click_count_for_down(1, pos), 3);
+        assert_eq!(click_count_for_up(1), 3);
+    }
+
+    #[test]
+    fn drag_resets_click_count() {
+        let _guard = CLICK_TEST_LOCK.lock().unwrap();
+        let pos = CGPoint::new(20.0, 40.0);
+        *CLICK_TRACKER.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+        assert_eq!(click_count_for_down(1, pos), 1);
+        note_drag(1);
+        assert_eq!(click_count_for_up(1), 1);
+        assert_eq!(click_count_for_down(1, pos), 1);
     }
 
     #[test]

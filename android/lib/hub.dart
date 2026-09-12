@@ -74,30 +74,39 @@ class Hub {
     }
   }
 
-  /// Returns true when every selected online target consumed the native pump.
-  bool sendPointer(
+  void sendPointer(
     double dx,
     double dy,
     int buttons,
-    int wheel, {
+    double wheel, {
     bool immediate = false,
   }) {
-    var sent = false;
-    var missed = false;
     for (final d in store.devices) {
       if (!d.selected) continue;
       for (final e in links.entries) {
         if (!online.contains(e.key)) continue;
         if (!_samePc(d, e.value.device)) continue;
-        if (e.value.sendPointer(dx, dy, buttons, wheel, immediate: immediate)) {
-          sent = true;
-        } else {
-          missed = true;
+        final link = e.value;
+        final pointerSpeed = store.pointerSpeedFor(d.os);
+        final sign = store.wheelReverseFor(d.os) ? -1 : 1;
+        final scaledWheel =
+            wheel * store.wheelSpeedFor(d.os) * sign + link._wheelRemainder;
+        final outWheel = scaledWheel.truncate();
+        link._wheelRemainder = scaledWheel - outWheel;
+        if (!link.sendPointer(
+          dx * pointerSpeed,
+          dy * pointerSpeed,
+          buttons,
+          outWheel,
+          immediate: immediate,
+        )) {
+          link.sendFast(
+            pointerMsg(dx * pointerSpeed, dy * pointerSpeed, buttons, outWheel),
+          );
         }
         break;
       }
     }
-    return sent && !missed;
   }
 
   void sendToFast(Device d, String json) {
@@ -125,6 +134,7 @@ class PcLink {
   final String key;
   Device device;
   bool _stop = false;
+  double _wheelRemainder = 0;
   Future<bool> Function(String)? _send;
   void Function(String)? _sendFast;
   void Function(double, double, int, int, bool)? _sendPointer;
@@ -149,6 +159,7 @@ class PcLink {
 
   void stop() {
     _stop = true;
+    _wheelRemainder = 0;
     final c = _close;
     _close = null;
     _send = null;
@@ -241,6 +252,7 @@ class PcLink {
       return session;
     } finally {
       hub.online.remove(id);
+      _wheelRemainder = 0;
       _send = null;
       _sendFast = null;
       _sendPointer = null;
@@ -255,6 +267,8 @@ class PcLink {
       if (v is Map && v['type'] == 'connected') {
         final did = v['device_id'] as String? ?? '';
         if (did.isNotEmpty) device.deviceId = did;
+        final os = v['os'] as String? ?? '';
+        if (os.isNotEmpty) device.os = os;
         // Display name is user-owned; never overwrite from the PC hostname.
         if (hub.store.collectAllIps && v['ips'] is List) {
           for (final e in v['ips'] as List) {
@@ -282,6 +296,12 @@ class NativeWs {
   static StreamSubscription<dynamic>? _sub;
   static final _waiters = <String, Completer<void>>{};
   static final _texts = <String, void Function(String)>{};
+  static void Function()? _onInputBackspace;
+
+  static set inputBackspaceHandler(void Function()? handler) {
+    _onInputBackspace = handler;
+    if (handler != null) _listen(restart: true);
+  }
 
   static Future<bool> voiceEvidence() async {
     try {
@@ -297,10 +317,19 @@ class NativeWs {
     } catch (_) {}
   }
 
-  static void _listen() {
+  static void _listen({bool restart = false}) {
+    if (restart) {
+      unawaited(_sub?.cancel());
+      _sub = null;
+      _events = null;
+    }
     _events ??= _e.receiveBroadcastStream();
     _sub ??= _events!.listen((ev) {
       if (ev is! Map) return;
+      if (ev['event'] == 'inputBackspace') {
+        _onInputBackspace?.call();
+        return;
+      }
       final id = ev['id'] as String?;
       if (id == null) return;
       if (ev['event'] == 'close') {

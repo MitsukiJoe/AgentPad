@@ -62,7 +62,10 @@ pub enum UpdateStatus {
     UpToDate,
     Available(UpdateInfo),
     Updating(String),
-    UpdateFailed { info: Box<UpdateInfo>, message: String },
+    UpdateFailed {
+        info: Box<UpdateInfo>,
+        message: String,
+    },
     Failed(String),
 }
 
@@ -128,9 +131,7 @@ fn manifest_urls() -> [String; 3] {
         / 3600;
     let path = format!("gh/{GITHUB_REPO}@update-manifest/agentpad-update.json");
     [
-        format!(
-            "https://github.com/{GITHUB_REPO}/releases/latest/download/agentpad-update.json"
-        ),
+        format!("https://github.com/{GITHUB_REPO}/releases/latest/download/agentpad-update.json"),
         format!("https://cdn.jsdelivr.net/{path}?hour={cache_hour}"),
         format!("https://cdn.jsdmirror.com/{path}?hour={cache_hour}"),
     ]
@@ -152,9 +153,7 @@ fn fetch_manifest(agent: &ureq::Agent, url: &str) -> Result<UpdateManifest, Stri
 }
 
 fn expected_asset_url(tag_name: &str, asset_name: &str) -> String {
-    format!(
-        "https://github.com/{GITHUB_REPO}/releases/download/{tag_name}/{asset_name}"
-    )
+    format!("https://github.com/{GITHUB_REPO}/releases/download/{tag_name}/{asset_name}")
 }
 
 fn valid_sha256(value: &str) -> bool {
@@ -197,9 +196,7 @@ fn fetch_latest_release() -> Result<Option<UpdateInfo>, String> {
             "agentpad-macos-arm64.zip"
         };
         let expected_url = expected_asset_url(&manifest.tag_name, expected_name);
-        if asset.name != expected_name
-            || asset.url != expected_url
-            || !valid_sha256(&asset.sha256)
+        if asset.name != expected_name || asset.url != expected_url || !valid_sha256(&asset.sha256)
         {
             errors.push(format!("更新清单安装包字段无效 ({url})"));
             continue;
@@ -282,7 +279,13 @@ pub fn is_post_update_launch() -> bool {
 fn is_newer_version(remote: &str, current: &str) -> bool {
     let parse = |v: &str| -> Vec<u64> {
         v.split('.')
-            .filter_map(|s| s.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().ok())
+            .filter_map(|s| {
+                s.chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+                    .parse()
+                    .ok()
+            })
             .collect()
     };
     let r = parse(remote);
@@ -291,8 +294,8 @@ fn is_newer_version(remote: &str, current: &str) -> bool {
 }
 
 fn https_agent(timeout: Duration) -> Result<ureq::Agent, String> {
-    let tls = ureq::native_tls::TlsConnector::new()
-        .map_err(|e| format!("初始化系统 TLS 失败: {e}"))?;
+    let tls =
+        ureq::native_tls::TlsConnector::new().map_err(|e| format!("初始化系统 TLS 失败: {e}"))?;
     Ok(ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(15))
         .timeout(timeout)
@@ -331,7 +334,9 @@ fn download_with_progress(
     let mut done: u64 = 0;
     let mut hasher = Sha256::new();
     loop {
-        let n = reader.read(&mut buf).map_err(|e| format!("下载中断: {e}"))?;
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| format!("下载中断: {e}"))?;
         if n == 0 {
             break;
         }
@@ -341,8 +346,7 @@ fn download_with_progress(
         done += n as u64;
         on_progress(done, total);
     }
-    file.flush()
-        .map_err(|e| format!("写入更新文件失败: {e}"))?;
+    file.flush().map_err(|e| format!("写入更新文件失败: {e}"))?;
     drop(file);
     if total > 0 && done != total {
         let _ = std::fs::remove_file(dest);
@@ -361,7 +365,9 @@ fn download_with_progress(
 #[cfg(target_os = "windows")]
 fn perform_update(info: &UpdateInfo, status: &Arc<Mutex<UpdateStatus>>) -> Result<(), String> {
     let exe_path = std::env::current_exe().map_err(|e| format!("获取当前路径失败: {e}"))?;
-    let exe_dir = exe_path.parent().ok_or_else(|| "无法获取程序目录".to_string())?;
+    let exe_dir = exe_path
+        .parent()
+        .ok_or_else(|| "无法获取程序目录".to_string())?;
 
     let tmp_file = exe_dir.join("agentpad_update.new");
     let report = |done: u64, total: u64| {

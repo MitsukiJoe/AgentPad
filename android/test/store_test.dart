@@ -83,6 +83,24 @@ void main() {
     expect(list.first.name, 'old');
   });
 
+  test('device os persists and merges from newer device data', () {
+    final list = upsertDevice(
+      [
+        Device(deviceId: 'a', name: 'A', ips: ['10.0.0.5'], port: 9618),
+      ],
+      Device(
+        deviceId: 'a',
+        name: 'A',
+        ips: ['10.0.0.6'],
+        port: 9618,
+        os: 'windows',
+      ),
+    );
+    expect(list.single.os, 'windows');
+    final json = list.single.toJson();
+    expect(Device.fromJson(json).os, 'windows');
+  });
+
   test('collect all ips setting defaults off and persists', () async {
     SharedPreferences.setMockInitialValues({});
     final s = PadStore();
@@ -143,22 +161,31 @@ void main() {
     expect(invalid.themeColor, 'blue');
   });
 
-  test('pointer mode and wheel side persist', () async {
+  test('pointer mode and wheel settings persist', () async {
     SharedPreferences.setMockInitialValues({});
     final s = PadStore();
     await s.load();
     expect(s.pointerMode, 'trackpad');
     expect(s.homePointerQuickSwitch, isTrue);
+    expect(s.deviceStripPlacement, 'input');
     expect(s.wheelSide, 'right');
+    expect(s.wheelReverseWindows, isFalse);
+    expect(s.wheelReverseMac, isFalse);
     s.pointerMode = 'trackball';
     s.homePointerQuickSwitch = false;
+    s.deviceStripPlacement = 'top';
     s.wheelSide = 'left';
+    s.wheelReverseWindows = true;
+    s.wheelReverseMac = true;
     await s.save();
     final s2 = PadStore();
     await s2.load();
     expect(s2.pointerMode, 'trackball');
     expect(s2.homePointerQuickSwitch, isFalse);
+    expect(s2.deviceStripPlacement, 'top');
     expect(s2.wheelSide, 'left');
+    expect(s2.wheelReverseWindows, isTrue);
+    expect(s2.wheelReverseMac, isTrue);
   });
 
   test('pointer hz defaults to 60 and persists', () async {
@@ -181,33 +208,51 @@ void main() {
     expect(invalid.pointerHz, 60);
   });
 
-  test('pointer and wheel speed default and persist', () async {
+  test('pointer and platform wheel speed default and persist', () async {
     SharedPreferences.setMockInitialValues({});
     final s = PadStore();
     await s.load();
-    expect(s.pointerSpeed, 2);
-    expect(s.wheelSpeed, 16);
-    s.pointerSpeed = 4;
-    s.wheelSpeed = 28;
+    expect(s.pointerSpeedWindows, 3);
+    expect(s.pointerSpeedMac, 3);
+    expect(s.wheelSpeedWindows, 1);
+    expect(s.wheelSpeedMac, 16);
+    expect(s.wheelSpeedFor('windows'), 1);
+    expect(s.wheelSpeedFor('macos'), 16);
+    s.pointerSpeedWindows = 5;
+    s.pointerSpeedMac = 7;
+    s.wheelSpeedWindows = 6;
+    s.wheelSpeedMac = 28;
     await s.save();
     final s2 = PadStore();
     await s2.load();
-    expect(s2.pointerSpeed, 4);
-    expect(s2.wheelSpeed, 28);
+    expect(s2.pointerSpeedWindows, 5);
+    expect(s2.pointerSpeedMac, 7);
+    expect(s2.wheelSpeedWindows, 6);
+    expect(s2.wheelSpeedMac, 28);
 
     SharedPreferences.setMockInitialValues({
-      'pointer_speed': 5.0,
-      'wheel_factor': 11.0,
+      'pointer_speed_windows': 8.0,
+      'pointer_speed_mac': 6.0,
+      'wheel_factor_windows': 11.0,
+      'wheel_factor_mac': 25.0,
     });
     final invalid = PadStore();
     await invalid.load();
-    expect(invalid.pointerSpeed, 2);
-    expect(invalid.wheelSpeed, 12);
+    expect(invalid.pointerSpeedWindows, 3);
+    expect(invalid.pointerSpeedMac, 6);
+    expect(invalid.wheelSpeedWindows, 7);
+    expect(invalid.wheelSpeedMac, 24);
 
-    SharedPreferences.setMockInitialValues({'wheel_speed': 4.0});
+    SharedPreferences.setMockInitialValues({
+      'pointer_speed': 4.0,
+      'wheel_speed': 4.0,
+    });
     final legacy = PadStore();
     await legacy.load();
-    expect(legacy.wheelSpeed, 16);
+    expect(legacy.pointerSpeedWindows, 4);
+    expect(legacy.pointerSpeedMac, 4);
+    expect(legacy.wheelSpeedWindows, 1);
+    expect(legacy.wheelSpeedMac, 16);
   });
 
   test('non-manual 240 falls back before auto detect', () async {
@@ -259,19 +304,34 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final s = PadStore();
     await s.load();
-    expect(s.landscapePointerSide, 'left');
-    s.landscapePointerSide = 'right';
+    expect(s.landscapePointerSide, 'right');
+    expect(s.forceLandscape, isFalse);
+    s.landscapePointerSide = 'left';
+    s.forceLandscape = true;
     await s.save();
     final s2 = PadStore();
     await s2.load();
-    expect(s2.landscapePointerSide, 'right');
+    expect(s2.landscapePointerSide, 'left');
+    expect(s2.forceLandscape, isTrue);
 
     SharedPreferences.setMockInitialValues({
       'landscape_pointer_side': 'bottom',
     });
     final invalid = PadStore();
     await invalid.load();
-    expect(invalid.landscapePointerSide, 'left');
+    expect(invalid.landscapePointerSide, 'right');
+  });
+
+  test('long press haptic defaults on and persists', () async {
+    SharedPreferences.setMockInitialValues({});
+    final s = PadStore();
+    await s.load();
+    expect(s.longPressHaptic, isTrue);
+    s.longPressHaptic = false;
+    await s.save();
+    final s2 = PadStore();
+    await s2.load();
+    expect(s2.longPressHaptic, isFalse);
   });
 
   test(
