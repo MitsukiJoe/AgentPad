@@ -99,7 +99,7 @@ impl Updater {
                     *status_arc.lock().unwrap() = UpdateStatus::UpToDate;
                 }
                 Err(e) => {
-                    crate::logutil::write(&format!("check update failed: {e}"));
+                    crate::logutil::write("update check failed");
                     *status_arc.lock().unwrap() = UpdateStatus::Failed(e);
                 }
             }
@@ -113,7 +113,7 @@ impl Updater {
         std::thread::spawn(move || {
             *status_arc.lock().unwrap() = UpdateStatus::Updating("正在下载更新...".into());
             if let Err(e) = perform_update(&info, &status_arc) {
-                crate::logutil::write(&format!("update failed: {e}"));
+                crate::logutil::write("update install failed");
                 *status_arc.lock().unwrap() = UpdateStatus::UpdateFailed {
                     info: Box::new(info),
                     message: e,

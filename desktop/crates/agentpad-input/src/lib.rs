@@ -84,17 +84,6 @@ pub fn accessibility_trusted() -> bool {
     }
 }
 
-pub fn accessibility_debug() -> String {
-    #[cfg(target_os = "macos")]
-    {
-        macos::accessibility_debug()
-    }
-    #[cfg(windows)]
-    {
-        "windows".into()
-    }
-}
-
 pub fn open_accessibility_settings() {
     #[cfg(target_os = "macos")]
     macos::open_accessibility_settings();
@@ -103,12 +92,6 @@ pub fn open_accessibility_settings() {
 pub fn prompt_accessibility() {
     #[cfg(target_os = "macos")]
     macos::prompt_accessibility();
-}
-
-pub fn current_exe() -> String {
-    std::env::current_exe()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default()
 }
 
 pub fn inject_text(text: &str) -> Result<(), Error> {

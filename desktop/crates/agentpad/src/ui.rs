@@ -79,8 +79,8 @@ impl PairingApp {
             .with_icon(tray_icon(tray_dark));
         let tray = match builder.build() {
             Ok(t) => Some(t),
-            Err(e) => {
-                crate::logutil::write(&format!("tray failed: {e}"));
+            Err(_e) => {
+                crate::logutil::write("tray create failed");
                 None
             }
         };
@@ -117,8 +117,8 @@ impl PairingApp {
     fn sync_desktop_icons(&mut self, _ctx: &egui::Context, _frame: &eframe::Frame, dark: bool) {
         if dark != self.tray_dark {
             if let Some(tray) = &self.tray {
-                if let Err(e) = tray.set_icon(Some(tray_icon(dark))) {
-                    crate::logutil::write(&format!("tray icon update failed: {e}"));
+                if let Err(_e) = tray.set_icon(Some(tray_icon(dark))) {
+                    crate::logutil::write("tray refresh failed");
                 } else {
                     self.tray_dark = dark;
                 }
@@ -259,10 +259,11 @@ impl PairingApp {
     fn poll_ax(&mut self, _ctx: &egui::Context) {
         let ax = agentpad_input::accessibility_trusted();
         if ax != self.ax_ok {
-            crate::logutil::write(&format!(
-                "accessibility {ax} {}",
-                agentpad_input::accessibility_debug()
-            ));
+            crate::logutil::write(if ax {
+                "permission check granted"
+            } else {
+                "permission check denied"
+            });
         }
         self.ax_ok = ax;
     }
@@ -287,9 +288,9 @@ impl eframe::App for PairingApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(
                 440.0,
                 if self.permission_expanded {
-                    892.0
+                    924.0
                 } else {
-                    772.0
+                    804.0
                 },
             )));
         }
@@ -691,14 +692,32 @@ impl eframe::App for PairingApp {
                                 if ui.checkbox(&mut enabled, "开机启动").changed() {
                                     match crate::autostart::set_enabled(enabled) {
                                         Ok(()) => self.autostart_enabled = enabled,
-                                        Err(e) => crate::logutil::write(&format!(
-                                            "autostart setting: {e}"
-                                        )),
+                                        Err(_) => crate::logutil::write("autostart setting failed"),
                                     }
                                 }
                             },
                         );
                     }
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(CONTENT_W, 28.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            let mut enabled = crate::logutil::enabled();
+                            if ui
+                                .checkbox(&mut enabled, "诊断日志（仅本次运行）")
+                                .on_hover_text("默认关闭；开启时清空旧日志，重启后自动关闭。")
+                                .changed()
+                            {
+                                crate::logutil::set_enabled(enabled);
+                            }
+                            if ui.small_button("打开日志").clicked() {
+                                crate::logutil::open_dir();
+                            }
+                            if ui.small_button("清空").clicked() {
+                                crate::logutil::clear();
+                            }
+                        },
+                    );
                     ui.add_space(24.0);
                     ui.add_sized(Vec2::new(CONTENT_W, 1.0), egui::Separator::default());
                     ui.add_space(14.0);
@@ -881,7 +900,7 @@ fn cjk_font_bytes() -> Option<Vec<u8>> {
     ];
     for path in CANDIDATES {
         if let Ok(bytes) = std::fs::read(path) {
-            crate::logutil::write(&format!("cjk font {path}"));
+            crate::logutil::write("font load ok");
             return Some(bytes);
         }
     }

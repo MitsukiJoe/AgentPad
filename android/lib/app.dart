@@ -20,6 +20,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'hub.dart';
 import 'pointer.dart';
+import 'diagnostic_log.dart';
 import 'protocol.dart';
 import 'store.dart';
 import 'touchpad.dart';
@@ -205,7 +206,7 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   static const _pageGutter = 12.0;
   static const _deviceStripFadeWidth = 10.0;
   static const _updateCheckInterval = Duration(hours: 24);
@@ -257,9 +258,12 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
+    unawaited(DiagnosticLog.refresh());
     store = widget.store;
+    WidgetsBinding.instance.addObserver(this);
     hub = Hub(
       store,
+      active: _connectionsActive,
       onChange: () {
         if (mounted) setState(() {});
       },
@@ -292,6 +296,30 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  bool get _connectionsActive =>
+      switch (WidgetsBinding.instance.lifecycleState) {
+        AppLifecycleState.hidden ||
+        AppLifecycleState.paused ||
+        AppLifecycleState.detached => false,
+        _ => true,
+      };
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    hub?.setActive(_connectionsActive);
+    if (!_connectionsActive) {
+      _stopTrackPoint();
+      pointerTimer?.cancel();
+      pointerTimer = null;
+      padLongPressTimer?.cancel();
+      pointer.tick();
+      pointerCadence.reset();
+      touchpad.cancel();
+      activePointerIds.clear();
+      pointerActive = leftDown = rightDown = false;
+    }
+  }
+
   Future<void> _applyPointerHzDefault() async {
     // One-shot: older builds read current 60Hz mode and/or left a manual pick.
     // Re-default from peak supported rate once, then honor later manual choices.
@@ -313,6 +341,7 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     pointerTimer?.cancel();
     trackPointTimer?.cancel();
     padLongPressTimer?.cancel();
@@ -2299,6 +2328,59 @@ class _HomePageState extends State<HomePage> {
               ],
             ),
             const SizedBox(height: 24),
+            SwitchListTile(
+              key: const ValueKey('diagnostic-toggle'),
+              contentPadding: EdgeInsets.zero,
+              title: const Text('诊断日志（仅本次运行）'),
+              subtitle: const Text('开启时清空旧日志，重启后自动关闭'),
+              value: DiagnosticLog.enabled,
+              onChanged: (value) async {
+                await DiagnosticLog.setEnabled(value);
+                if (ctx.mounted) setSheet(() {});
+              },
+            ),
+            Row(
+              children: [
+                TextButton(
+                  key: const ValueKey('diagnostic-view'),
+                  onPressed: () async {
+                    final log = await DiagnosticLog.read();
+                    if (!ctx.mounted) return;
+                    await showDialog<void>(
+                      context: ctx,
+                      builder: (context) => AlertDialog(
+                        title: const Text('诊断日志'),
+                        content: SizedBox(
+                          width: double.maxFinite,
+                          child: SingleChildScrollView(
+                            child: SelectableText(log.isEmpty ? '暂无日志' : log),
+                          ),
+                        ),
+                        actions: [
+                          TextButton(
+                            onPressed: () => Navigator.pop(context),
+                            child: const Text('关闭'),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                  child: const Text('查看日志'),
+                ),
+                TextButton(
+                  key: const ValueKey('diagnostic-clear'),
+                  onPressed: () async {
+                    final cleared = await DiagnosticLog.clear();
+                    if (ctx.mounted) {
+                      ScaffoldMessenger.of(ctx).showSnackBar(
+                        SnackBar(content: Text(cleared ? '日志已清空' : '清空失败')),
+                      );
+                    }
+                  },
+                  child: const Text('清空日志'),
+                ),
+              ],
+            ),
             const Divider(height: 1),
             const SizedBox(height: 16),
             Row(
@@ -2459,7 +2541,6 @@ class _HomePageState extends State<HomePage> {
       client = HttpClient();
       client.connectionTimeout = const Duration(seconds: 8);
       AndroidUpdateInfo? latest;
-      String? lastError;
       final sources = androidUpdateManifestUris();
       for (var index = 0; index < sources.length; index++) {
         final uri = sources[index];
@@ -2471,7 +2552,6 @@ class _HomePageState extends State<HomePage> {
             const Duration(seconds: 12),
           );
           if (response.statusCode != 200) {
-            lastError = '$uri: HTTP ${response.statusCode}';
             continue;
           }
           final raw = await response
@@ -2480,7 +2560,6 @@ class _HomePageState extends State<HomePage> {
               .timeout(const Duration(seconds: 12));
           final candidate = parseAndroidUpdateManifest(raw);
           if (candidate == null) {
-            lastError = '$uri: 更新清单格式无效';
             continue;
           }
           if (index == 0) {
@@ -2488,13 +2567,11 @@ class _HomePageState extends State<HomePage> {
             break;
           }
           latest = newerAndroidUpdate(latest, candidate);
-        } catch (e) {
-          lastError = '$uri: $e';
-        }
+        } catch (_) {}
       }
       if (latest == null) {
         if (mounted && notify) _showUpdateNotice('检查更新失败');
-        if (lastError != null) debugPrint('update manifest: $lastError');
+        unawaited(DiagnosticLog.record(DiagnosticKind.update, DiagnosticStage.check, DiagnosticResult.failed));
         return;
       }
       final update = latest;
@@ -2936,6 +3013,7 @@ class _HomePageState extends State<HomePage> {
                             hub?.dispose();
                             hub = Hub(
                               store,
+                              active: _connectionsActive,
                               onChange: () {
                                 if (mounted) setState(() {});
                                 setSheet(() {});

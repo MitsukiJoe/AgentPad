@@ -46,7 +46,7 @@ impl AppState {
 pub async fn serve(state: Arc<AppState>, bind: SocketAddr) -> std::io::Result<SocketAddr> {
     let listener = TcpListener::bind(bind).await?;
     let addr = listener.local_addr()?;
-    crate::logutil::write(&format!("ws listen {addr}"));
+    crate::logutil::write("connection listen ok");
     tokio::spawn(accept_loop(listener, state));
     Ok(addr)
 }
@@ -79,17 +79,17 @@ pub async fn serve_with_retry(
 async fn accept_loop(listener: TcpListener, state: Arc<AppState>) {
     loop {
         match listener.accept().await {
-            Ok((stream, peer)) => {
-                crate::logutil::write(&format!("ws accept {peer}"));
+            Ok((stream, _peer)) => {
+                crate::logutil::write("connection accept ok");
                 let state = state.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_socket(stream, state).await {
-                        crate::logutil::write(&format!("ws session: {e}"));
+                    if handle_socket(stream, state).await.is_err() {
+                        crate::logutil::write("connection session failed");
                     }
                 });
             }
-            Err(e) => {
-                crate::logutil::write(&format!("ws accept err: {e}"));
+            Err(_e) => {
+                crate::logutil::write("connection accept failed");
             }
         }
     }
@@ -194,18 +194,18 @@ async fn handle_socket(
             out = rx.recv() => {
                 let Some(msg) = out else { break; };
                 sink.send(Message::Text(serde_json::to_string(&msg)?.into())).await?;
+                crate::logutil::write("message send ok");
             }
             incoming = source.next() => {
                 let Some(frame) = incoming else { break; };
                 let Message::Text(text) = frame? else { continue; };
                 let Ok(msg) = serde_json::from_str::<InMsg>(&text) else {
-                    crate::logutil::write(&format!("bad msg {text}"));
+                    crate::logutil::write("message parse failed");
                     continue;
                 };
-                if !matches!(msg, InMsg::Pointer { .. } | InMsg::Ping) {
-                    crate::logutil::write(&format!("in {msg:?}"));
-                }
                 let paused = state.paused.load(Ordering::SeqCst);
+                crate::logutil::operation(crate::logutil::input_category(&msg), false, !paused || matches!(msg, InMsg::Hello { .. } | InMsg::Ping));
+                let pointer = matches!(msg, InMsg::Pointer { .. });
                 let (replies, actions) = handle::handle(paused, state.sync_enabled(), &mut conn, msg);
                 if !actions.is_empty() {
                     if actions
@@ -219,10 +219,14 @@ async fn handle_socket(
                 }
                 for r in replies {
                     sink.send(Message::Text(serde_json::to_string(&r)?.into())).await?;
+                    if !pointer {
+                        crate::logutil::write("message send ok");
+                    }
                 }
             }
         }
     }
+    crate::logutil::write("connection session closed");
     Ok(())
 }
 

@@ -67,10 +67,12 @@ class MainActivity : FlutterActivity() {
 
     override fun onStart() {
         super.onStart()
+        ws?.setVisible(true)
         inputView?.visibility = View.VISIBLE
     }
 
     override fun onStop() {
+        ws?.setVisible(false)
         inputView?.visibility = View.GONE
         super.onStop()
     }
@@ -116,6 +118,7 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        ws?.dispose()
         ws = null
         if (::voiceRecording.isInitialized) voiceRecording.stop()
         super.cleanUpFlutterEngine(flutterEngine)
@@ -266,6 +269,9 @@ class WifiWs(
     engine: FlutterEngine,
     private val voiceRecording: VoiceRecordingTracker,
 ) : EventChannel.StreamHandler {
+    private var visible = false
+    private val methodChannel = MethodChannel(engine.dartExecutor.binaryMessenger, "agentpad/ws")
+    private val eventChannel = EventChannel(engine.dartExecutor.binaryMessenger, "agentpad/ws_events")
     private val sockets = ConcurrentHashMap<String, WebSocket>()
     private val pointer = PointerPump(sockets)
     private var events: EventChannel.EventSink? = null
@@ -279,9 +285,18 @@ class WifiWs(
         }.getOrNull()
 
     init {
-        MethodChannel(engine.dartExecutor.binaryMessenger, "agentpad/ws")
-            .setMethodCallHandler { call, result ->
+        methodChannel.setMethodCallHandler { call, result ->
                 when (call.method) {
+                    "diagnosticEnabled" -> result.success(DiagnosticLog.enabled)
+                    "diagnosticSetEnabled" -> result.success(DiagnosticLog.setEnabled(ctx.filesDir, call.arguments == true))
+                    "diagnosticRead" -> result.success(DiagnosticLog.read(ctx.filesDir))
+                    "diagnosticClear" -> {
+                        result.success(runCatching { DiagnosticLog.clear(ctx.filesDir) }.isSuccess)
+                    }
+                    "diagnosticEvent" -> {
+                        DiagnosticLog.event(call.argument<String>("kind"), call.argument<String>("stage"), call.argument<String>("result"), call.argument<Int>("count") ?: 1)
+                        result.success(null)
+                    }
                     "connect" -> {
                         val id = call.argument<String>("id") ?: ""
                         val host = call.argument<String>("host") ?: ""
@@ -290,7 +305,8 @@ class WifiWs(
                     }
                     "pointer" -> {
                         val id = call.argument<String>("id") ?: ""
-                        pointer.add(
+                        DiagnosticLog.event("pointer", "send", if (visible && sockets.containsKey(id)) "ok" else "failed")
+                        if (visible && sockets.containsKey(id)) pointer.add(
                             id,
                             num(call, "dx"),
                             num(call, "dy"),
@@ -307,12 +323,18 @@ class WifiWs(
                     "send" -> {
                         val id = call.argument<String>("id") ?: ""
                         val text = call.argument<String>("text") ?: ""
-                        result.success(sockets[id]?.send(text) == true)
+                        val ok = sockets[id]?.send(text) == true
+                        if (DiagnosticLog.enabled) {
+                            val kind = runCatching { org.json.JSONObject(text).optString("type") }.getOrDefault("unknown")
+                            val safeKind = if (kind in setOf("text", "key", "pointer", "undo", "ping", "hello")) kind else "unknown"
+                            DiagnosticLog.event(safeKind, "send", if (ok) "ok" else "failed")
+                        }
+                        result.success(ok)
                     }
                     "close" -> {
                         val id = call.argument<String>("id") ?: ""
                         pointer.drop(id)
-                        sockets.remove(id)?.close(1000, null)
+                        sockets.remove(id)?.cancel()
                         releaseWifiIfIdle()
                         result.success(true)
                     }
@@ -380,8 +402,28 @@ class WifiWs(
                     else -> result.notImplemented()
                 }
             }
-        EventChannel(engine.dartExecutor.binaryMessenger, "agentpad/ws_events")
-            .setStreamHandler(this)
+        eventChannel.setStreamHandler(this)
+    }
+
+    fun setVisible(value: Boolean) {
+        visible = value
+        DiagnosticLog.event("lifecycle", if (value) "start" else "stop", if (value) "active" else "inactive")
+        if (value) return
+        for ((id, socket) in sockets) {
+            if (sockets.remove(id, socket)) {
+                pointer.drop(id)
+                socket.cancel()
+                emit(id, "close")
+            }
+        }
+        releaseWifiIfIdle()
+    }
+
+    fun dispose() {
+        setVisible(false)
+        events = null
+        methodChannel.setMethodCallHandler(null)
+        eventChannel.setStreamHandler(null)
     }
 
     override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
@@ -401,8 +443,12 @@ class WifiWs(
     }
 
     private fun connect(id: String, host: String, port: Int, result: MethodChannel.Result) {
+        if (!visible) {
+            result.success(false)
+            return
+        }
         pointer.drop(id)
-        sockets.remove(id)?.close(1000, null)
+        sockets.remove(id)?.cancel()
         val settled = AtomicBoolean()
         fun settle(ok: Boolean) {
             if (settled.compareAndSet(false, true)) main.post { result.success(ok) }
@@ -421,33 +467,40 @@ class WifiWs(
             req,
             object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
-                    if (sockets[id] === webSocket) holdWifi()
-                    settle(sockets[id] === webSocket)
+                    main.post {
+                        val current = visible && sockets[id] === webSocket
+                        if (current) holdWifi() else webSocket.cancel()
+                        settle(current)
+                    }
                 }
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
-                    if (sockets[id] !== webSocket) return
                     main.post {
+                        if (!visible || sockets[id] !== webSocket) return@post
                         events?.success(mapOf("id" to id, "event" to "text", "data" to text))
                     }
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                    if (sockets.remove(id, webSocket)) {
-                        pointer.drop(id)
-                        releaseWifiIfIdle()
-                        emit(id, "close")
+                    main.post {
+                        if (sockets.remove(id, webSocket)) {
+                            pointer.drop(id)
+                            releaseWifiIfIdle()
+                            emit(id, "close")
+                        }
+                        settle(false)
                     }
-                    settle(false)
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    if (sockets.remove(id, webSocket)) {
-                        pointer.drop(id)
-                        releaseWifiIfIdle()
-                        emit(id, "close")
+                    main.post {
+                        if (sockets.remove(id, webSocket)) {
+                            pointer.drop(id)
+                            releaseWifiIfIdle()
+                            emit(id, "close")
+                        }
+                        settle(false)
                     }
-                    settle(false)
                 }
             },
         )
@@ -535,6 +588,7 @@ class WifiWs(
     }
 
     private fun holdWifi() {
+        if (!visible) return
         wifiLock?.takeUnless { it.isHeld }?.let { runCatching { it.acquire() } }
         cpuLock?.takeUnless { it.isHeld }?.let { runCatching { it.acquire() } }
     }

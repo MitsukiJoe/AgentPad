@@ -94,16 +94,6 @@ pub(crate) fn accessibility_trusted() -> bool {
     unsafe { AXIsProcessTrusted() != 0 }
 }
 
-pub(crate) fn accessibility_debug() -> String {
-    let ax = unsafe { AXIsProcessTrusted() };
-    format!(
-        "ax={ax} exe={}",
-        std::env::current_exe()
-            .map(|path| path.display().to_string())
-            .unwrap_or_default()
-    )
-}
-
 pub(crate) fn prompt_accessibility() {
     let _ = ax_prompt();
 }
@@ -506,14 +496,6 @@ mod tests {
         assert_eq!(keycode("Enter"), Some(KeyCode::RETURN));
         assert_eq!(keycode("v"), Some(KeyCode::ANSI_V));
         assert!(keycode("unknown").is_none());
-    }
-
-    #[test]
-    fn ax_debug_has_state_and_executable() {
-        let s = accessibility_debug();
-        assert!(s.contains("ax="), "{s}");
-        assert!(s.contains("exe="), "{s}");
-        assert!(!s.contains("resp="), "{s}");
     }
 
     #[test]

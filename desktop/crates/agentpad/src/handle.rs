@@ -155,7 +155,9 @@ fn apply_text(conn: &mut Conn, content: &str, auto_enter: bool, send_mode: &str)
 
 pub fn apply_actions(actions: &[Action]) {
     if !actions.is_empty() && !agentpad_input::accessibility_trusted() {
-        crate::logutil::write("inject blocked: accessibility permission missing");
+        for action in actions {
+            crate::logutil::operation(crate::logutil::action_category(action), true, false);
+        }
         return;
     }
     let mut pasted = false;
@@ -179,11 +181,7 @@ pub fn apply_actions(actions: &[Action]) {
             } => agentpad_input::inject_pointer(*dx, *dy, *buttons, *wheel),
         };
         let succeeded = r.is_ok();
-        if let Err(e) = r {
-            crate::logutil::write(&format!("inject: {e}"));
-        } else if !matches!(a, Action::Pointer { .. }) {
-            crate::logutil::write("inject ok");
-        }
+        crate::logutil::operation(crate::logutil::action_category(a), true, succeeded);
         pasted = succeeded && matches!(a, Action::Text(_));
     }
 }

@@ -12,6 +12,86 @@ import 'package:agentpad/store.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  testWidgets(
+    'visibility stops connections and stale connects cannot close resumed links',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final first = Completer<bool>();
+      final connects = <String>[];
+      final closed = <String>[];
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(
+        const MethodChannel('agentpad/ws_events'),
+        (_) async => null,
+      );
+      messenger.setMockMethodCallHandler(const MethodChannel('agentpad/ws'), (
+        call,
+      ) async {
+        if (call.method == 'connect') {
+          connects.add((call.arguments as Map)['id'] as String);
+          return connects.length == 1 ? first.future : true;
+        }
+        if (call.method == 'close') {
+          closed.add((call.arguments as Map)['id'] as String);
+        }
+        return call.method == 'send' ? true : null;
+      });
+      final store = PadStore()
+        ..devices = [
+          Device(deviceId: 'pc', name: 'PC', ips: ['127.0.0.1'], port: 9618),
+        ];
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: HomePage(store: store, enableAutomaticUpdateChecks: false),
+        ),
+      );
+      await tester.pump();
+      await tester.enterText(find.byKey(const ValueKey('text-input')), 'draft');
+      expect(connects, hasLength(1));
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      await tester.pump();
+      expect(closed, isEmpty);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+      await tester.pump(const Duration(seconds: 5));
+      expect(connects, hasLength(1));
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump();
+      expect(connects, hasLength(2));
+      expect(connects.toSet(), hasLength(2));
+      first.complete(true);
+      await tester.pump();
+      expect(closed, contains(connects.first));
+      expect(closed, isNot(contains(connects.last)));
+      expect(find.text('draft'), findsOneWidget);
+      expect(store.devices.single.selected, isTrue);
+      await tester.tap(find.byKey(const ValueKey('send-button')));
+      await tester.pump();
+      expect(find.text('draft'), findsNothing);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      await tester.pump(const Duration(seconds: 5));
+      expect(closed, contains(connects.last));
+      expect(connects, hasLength(2));
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump();
+      messenger.setMockMethodCallHandler(
+        const MethodChannel('agentpad/ws'),
+        null,
+      );
+      messenger.setMockMethodCallHandler(
+        const MethodChannel('agentpad/ws_events'),
+        null,
+      );
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    },
+  );
+
   testWidgets('layout has top status and send beside input', (tester) async {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();
@@ -845,10 +925,19 @@ void main() {
     final moves = pointerCalls.where((call) => call['dx'] != 0).toList();
     expect(
       moves,
-      containsAll([containsPair('id', 'win'), containsPair('id', 'mac')]),
+      containsAll([
+        containsPair('id', startsWith('win:')),
+        containsPair('id', startsWith('mac:')),
+      ]),
     );
-    expect(moves.firstWhere((call) => call['id'] == 'win')['dx'], 8);
-    expect(moves.firstWhere((call) => call['id'] == 'mac')['dx'], 20);
+    expect(
+      moves.firstWhere((call) => (call['id'] as String).startsWith('win:'))['dx'],
+      8,
+    );
+    expect(
+      moves.firstWhere((call) => (call['id'] as String).startsWith('mac:'))['dx'],
+      20,
+    );
 
     await tester.pumpWidget(const SizedBox.shrink());
   });

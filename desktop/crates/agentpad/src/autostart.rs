@@ -6,8 +6,8 @@ pub fn apply() {
     if !available() {
         return;
     }
-    if let Err(e) = sync_system(enabled()) {
-        crate::logutil::write(&format!("autostart: {e}"));
+    if sync_system(enabled()).is_err() {
+        crate::logutil::write("autostart apply failed");
     }
 }
 

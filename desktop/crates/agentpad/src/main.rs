@@ -18,13 +18,7 @@ fn main() -> eframe::Result {
     autostart::apply();
     updater::cleanup_stale_updater_script();
     let identity = identity::load();
-    logutil::write(&format!(
-        "start {} {} {} exe={}",
-        identity.name,
-        identity.device_id,
-        agentpad_input::accessibility_debug(),
-        agentpad_input::current_exe()
-    ));
+    logutil::clear();
 
     let rt = tokio::runtime::Runtime::new().expect("tokio");
     let state = ws::AppState::new(identity);
@@ -32,17 +26,17 @@ fn main() -> eframe::Result {
     match rt.block_on(ws::serve_with_retry(state.clone(), bind, post_update)) {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            eprintln!("AgentPad is already running (port {})", protocol::PORT);
+            logutil::write("connection listen already_running");
             std::process::exit(0);
         }
-        Err(e) => {
-            eprintln!("listen {bind}: {e}");
+        Err(_) => {
+            logutil::write("connection listen failed");
             std::process::exit(1);
         }
     }
 
     let viewport = eframe::egui::ViewportBuilder::default()
-        .with_inner_size([440.0, 772.0])
+        .with_inner_size([440.0, 804.0])
         .with_title("AgentPad")
         .with_resizable(false);
     #[cfg(target_os = "windows")]

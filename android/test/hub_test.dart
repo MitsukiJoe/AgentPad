@@ -29,6 +29,28 @@ class RecordingLink extends PcLink {
 }
 
 void main() {
+  test('paused hubs ignore sync and disposal clears online state', () {
+    final store = PadStore()
+      ..devices = [
+        Device(deviceId: 'pc', name: 'PC', ips: ['127.0.0.1'], port: 9618),
+      ];
+    final hub = Hub(store, active: false);
+    hub.sync();
+    expect(hub.links, isEmpty);
+    hub.links['pc'] = RecordingLink(
+      hub,
+      store.devices.single,
+      'pc',
+      native: true,
+    );
+    hub.online.add('pc');
+    hub.dispose();
+    hub.sync();
+    expect(hub.links, isEmpty);
+    expect(hub.online, isEmpty);
+    expect(store.devices.single.selected, isTrue);
+  });
+
   test(
     'mixed transports scale each online target once and retain wheel fractions',
     () {

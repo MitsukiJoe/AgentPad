@@ -4,24 +4,38 @@ import 'dart:convert';
 import 'package:flutter/services.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import 'diagnostic_log.dart';
 import 'protocol.dart';
 import 'store.dart';
 
 typedef OnHub = void Function();
 
 class Hub {
-  Hub(this.store, {this.onChange});
+  Hub(this.store, {this.onChange, this.active = true});
 
   final PadStore store;
   final OnHub? onChange;
   final Map<String, PcLink> links = {};
   final Set<String> online = {};
+  bool active;
+
+  void setActive(bool value) {
+    if (active == value) return;
+    active = value;
+    if (active) {
+      sync();
+    } else {
+      _stopLinks();
+      onChange?.call();
+    }
+  }
 
   static String keyOf(Device d) => d.deviceId.isNotEmpty
       ? d.deviceId
       : (d.ips.isEmpty ? d.name : '${d.ips.first}:${d.port}');
 
   void sync() {
+    if (!active) return;
     final keys = {for (final d in store.devices) keyOf(d)};
     for (final k in links.keys.toList()) {
       if (!keys.contains(k)) {
@@ -120,10 +134,16 @@ class Hub {
   }
 
   void dispose() {
+    active = false;
+    _stopLinks();
+  }
+
+  void _stopLinks() {
     for (final l in links.values) {
       l.stop();
     }
     links.clear();
+    online.clear();
   }
 }
 
@@ -134,6 +154,9 @@ class PcLink {
   final String key;
   Device device;
   bool _stop = false;
+  static int _nextTransportId = 0;
+  Timer? _retryTimer;
+  Completer<void>? _retryDone;
   double _wheelRemainder = 0;
   Future<bool> Function(String)? _send;
   void Function(String)? _sendFast;
@@ -150,8 +173,12 @@ class PcLink {
           connected = await _try(ip, device.port);
           if (connected) break;
         }
-        if (!connected) {
-          await Future<void>.delayed(const Duration(seconds: 2));
+        if (!connected && !_stop) {
+          final done = _retryDone = Completer<void>();
+          _retryTimer = Timer(const Duration(seconds: 2), done.complete);
+          await done.future;
+          _retryDone = null;
+          _retryTimer = null;
         }
       }
     }();
@@ -159,13 +186,15 @@ class PcLink {
 
   void stop() {
     _stop = true;
+    _retryTimer?.cancel();
+    if (_retryDone?.isCompleted == false) _retryDone!.complete();
     _wheelRemainder = 0;
     final c = _close;
     _close = null;
     _send = null;
     _sendFast = null;
     _sendPointer = null;
-    hub.online.remove(key);
+    if (identical(hub.links[key], this)) hub.online.remove(key);
     c?.call();
   }
 
@@ -173,14 +202,25 @@ class PcLink {
 
   Future<bool> send(String json) async {
     final s = _send;
-    if (s == null) return false;
-    return s(json);
+    final ok = s != null && await s(json);
+    if (DiagnosticLog.enabled && !hasPointerPump) {
+      unawaited(DiagnosticLog.record(
+        DiagnosticLog.classify(json), DiagnosticStage.send,
+        ok ? DiagnosticResult.ok : DiagnosticResult.failed,
+      ));
+    }
+    return ok;
   }
 
   void sendFast(String json) {
     final f = _sendFast;
     if (f != null) {
       f(json);
+      if (DiagnosticLog.enabled && !hasPointerPump) {
+        unawaited(DiagnosticLog.record(
+          DiagnosticLog.classify(json), DiagnosticStage.send, DiagnosticResult.ok,
+        ));
+      }
       return;
     }
     unawaited(send(json));
@@ -200,10 +240,12 @@ class PcLink {
   }
 
   Future<bool> _try(String host, int port) async {
-    final id = key;
+    final id = '$key:${_nextTransportId++}';
     var session = false;
+    unawaited(DiagnosticLog.record(DiagnosticKind.connection, DiagnosticStage.start, DiagnosticResult.active));
     try {
       try {
+        _close = () => NativeWs.closeId(id);
         final native = await NativeWs.connect(
           id,
           host,
@@ -219,16 +261,20 @@ class PcLink {
           _sendFast = native.sendFast;
           _sendPointer = native.addPointer;
           _close = native.close;
-          hub.online.add(id);
+          hub.online.add(key);
           hub.onChange?.call();
           await native.send(helloMsg(hub.store.clientId, 'Android'));
           session = true;
+          unawaited(DiagnosticLog.record(
+            DiagnosticKind.connection, DiagnosticStage.start, DiagnosticResult.ok,
+          ));
           await native.done;
           return true;
         }
       } catch (_) {}
       if (_stop) return false;
       final ch = WebSocketChannel.connect(Uri.parse('ws://$host:$port'));
+      _close = () async => ch.sink.close();
       await ch.ready.timeout(const Duration(seconds: 4));
       if (_stop) {
         await ch.sink.close();
@@ -240,10 +286,11 @@ class PcLink {
       };
       _sendFast = (String j) => ch.sink.add(j);
       _close = () async => ch.sink.close();
-      hub.online.add(id);
+      hub.online.add(key);
       hub.onChange?.call();
       ch.sink.add(helloMsg(hub.store.clientId, 'Android'));
       session = true;
+      unawaited(DiagnosticLog.record(DiagnosticKind.connection, DiagnosticStage.start, DiagnosticResult.ok));
       await for (final msg in ch.stream) {
         if (msg is String) _onServer(msg);
       }
@@ -251,17 +298,27 @@ class PcLink {
     } catch (_) {
       return session;
     } finally {
-      hub.online.remove(id);
+      unawaited(DiagnosticLog.record(DiagnosticKind.connection, DiagnosticStage.stop, session ? DiagnosticResult.ok : DiagnosticResult.failed));
+      if (identical(hub.links[key], this)) hub.online.remove(key);
+      final close = _close;
+      _close = null;
+      unawaited(close?.call());
       _wheelRemainder = 0;
       _send = null;
       _sendFast = null;
       _sendPointer = null;
       _close = null;
-      hub.onChange?.call();
+      if (identical(hub.links[key], this)) hub.onChange?.call();
     }
   }
 
   void _onServer(String raw) {
+    if (_stop) return;
+    if (DiagnosticLog.enabled) {
+      unawaited(DiagnosticLog.record(
+        DiagnosticLog.classify(raw), DiagnosticStage.receive, DiagnosticResult.ok,
+      ));
+    }
     try {
       final v = jsonDecode(raw);
       if (v is Map && v['type'] == 'connected') {
@@ -419,12 +476,11 @@ class NativeWs {
     );
   }
 
-  Future<void> close() async {
-    if (identical(_waiters[id], _done)) {
-      _texts.remove(id);
-      _waiters.remove(id);
-      _done.complete();
-    }
+  Future<void> close() => closeId(id);
+
+  static Future<void> closeId(String id) async {
+    _texts.remove(id);
+    _waiters.remove(id)?.complete();
     try {
       await _m.invokeMethod('close', {'id': id});
     } catch (_) {}

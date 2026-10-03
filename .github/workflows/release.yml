@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -57,8 +57,6 @@ jobs:
     runs-on: windows-latest
     env:
       AGENTPAD_VERSION: ${{ needs.prepare-version.outputs.version }}
-      WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
-      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -78,25 +76,35 @@ jobs:
           Copy-Item desktop\target\x86_64-pc-windows-msvc\release\agentpad.exe agentpad-windows-x64.exe
 
       - name: Sign Windows executable
-        if: ${{ env.WINDOWS_CERTIFICATE_PFX_BASE64 != '' && env.WINDOWS_CERTIFICATE_PASSWORD != '' }}
         shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
-          $certificatePath = Join-Path $env:RUNNER_TEMP "agentpad-signing.pfx"
-          $certificateBytes = [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX_BASE64)
-          [IO.File]::WriteAllBytes($certificatePath, $certificateBytes)
-          $programFilesX86 = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)
-          $kitsRoot = Join-Path $programFilesX86 "Windows Kits\10\bin"
-          $signtool = Get-ChildItem "$kitsRoot\*\x64\signtool.exe" |
-            Sort-Object FullName -Descending |
-            Select-Object -First 1
-          if (-not $signtool) {
-            throw "signtool.exe was not found"
+          if ([string]::IsNullOrEmpty($env:WINDOWS_CERTIFICATE_PFX_BASE64) -or [string]::IsNullOrEmpty($env:WINDOWS_CERTIFICATE_PASSWORD)) {
+            Write-Host "Windows signing secrets not configured; publishing unsigned executable"
+            exit 0
           }
-          $signtoolPath = $signtool.FullName
-          & $signtoolPath sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f $certificatePath /p $env:WINDOWS_CERTIFICATE_PASSWORD agentpad-windows-x64.exe
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $signtoolPath verify /pa /v agentpad-windows-x64.exe
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $certificatePath = Join-Path $env:RUNNER_TEMP "agentpad-signing.pfx"
+          try {
+            $certificateBytes = [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX_BASE64)
+            [IO.File]::WriteAllBytes($certificatePath, $certificateBytes)
+            $programFilesX86 = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)
+            $kitsRoot = Join-Path $programFilesX86 "Windows Kits\10\bin"
+            $signtool = Get-ChildItem "$kitsRoot\*\x64\signtool.exe" |
+              Sort-Object FullName -Descending |
+              Select-Object -First 1
+            if (-not $signtool) {
+              throw "signtool.exe was not found"
+            }
+            $signtoolPath = $signtool.FullName
+            & $signtoolPath sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f $certificatePath /p $env:WINDOWS_CERTIFICATE_PASSWORD agentpad-windows-x64.exe
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            & $signtoolPath verify /pa /v agentpad-windows-x64.exe
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            Remove-Item -LiteralPath $certificatePath -Force -ErrorAction SilentlyContinue
+          }
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v7
@@ -111,12 +119,6 @@ jobs:
     runs-on: macos-latest
     env:
       AGENTPAD_VERSION: ${{ needs.prepare-version.outputs.version }}
-      MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
-      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-      MACOS_CERTIFICATE_IDENTITY: ${{ secrets.MACOS_CERTIFICATE_IDENTITY }}
-      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-      APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
-      APPLE_API_PRIVATE_KEY_BASE64: ${{ secrets.APPLE_API_PRIVATE_KEY_BASE64 }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -126,12 +128,36 @@ jobs:
         with:
           targets: aarch64-apple-darwin
 
-      - name: Import macOS signing certificate
-        if: ${{ env.MACOS_CERTIFICATE_P12_BASE64 != '' && env.MACOS_CERTIFICATE_PASSWORD != '' && env.MACOS_CERTIFICATE_IDENTITY != '' }}
-        id: signing
+      - name: Test desktop application
+        run: cargo test --manifest-path desktop/Cargo.toml -p agentpad
+
+      - name: Build macOS application
         shell: bash
         run: |
+          cargo build --manifest-path desktop/Cargo.toml -p agentpad --release --target aarch64-apple-darwin
+          app="desktop/target/aarch64-apple-darwin/release/AgentPad.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp desktop/macos/Info.plist "$app/Contents/Info.plist"
+          cp desktop/macos/AgentPad.icns "$app/Contents/Resources/AgentPad.icns"
+          cp desktop/target/aarch64-apple-darwin/release/agentpad "$app/Contents/MacOS/agentpad"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $AGENTPAD_VERSION" "$app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GITHUB_RUN_NUMBER" "$app/Contents/Info.plist"
+
+      - name: Import macOS signing certificate
+        id: signing
+        shell: bash
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_CERTIFICATE_IDENTITY: ${{ secrets.MACOS_CERTIFICATE_IDENTITY }}
+        run: |
+          if [ -z "$MACOS_CERTIFICATE_P12_BASE64" ] || [ -z "$MACOS_CERTIFICATE_PASSWORD" ] || [ -z "$MACOS_CERTIFICATE_IDENTITY" ]; then
+            echo "macOS signing secrets not configured; using ad-hoc signature"
+            exit 0
+          fi
           certificate_path="$RUNNER_TEMP/agentpad-signing.p12"
+          trap 'rm -f "$certificate_path"' EXIT
+          umask 077
           keychain_path="$RUNNER_TEMP/agentpad-signing.keychain-db"
           keychain_password="$(uuidgen)"
           printf '%s' "$MACOS_CERTIFICATE_P12_BASE64" | openssl base64 -d -A -out "$certificate_path"
@@ -150,23 +176,13 @@ jobs:
           echo "identity=$identity" >> "$GITHUB_OUTPUT"
           echo "developer_id=$developer_id" >> "$GITHUB_OUTPUT"
 
-      - name: Test desktop application
-        run: cargo test --manifest-path desktop/Cargo.toml -p agentpad
-
-      - name: Build and sign macOS application
+      - name: Sign and package macOS application
         shell: bash
         env:
           SIGNING_IDENTITY: ${{ steps.signing.outputs.identity }}
           DEVELOPER_ID: ${{ steps.signing.outputs.developer_id }}
         run: |
-          cargo build --manifest-path desktop/Cargo.toml -p agentpad --release --target aarch64-apple-darwin
           app="desktop/target/aarch64-apple-darwin/release/AgentPad.app"
-          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-          cp desktop/macos/Info.plist "$app/Contents/Info.plist"
-          cp desktop/macos/AgentPad.icns "$app/Contents/Resources/AgentPad.icns"
-          cp desktop/target/aarch64-apple-darwin/release/agentpad "$app/Contents/MacOS/agentpad"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $AGENTPAD_VERSION" "$app/Contents/Info.plist"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GITHUB_RUN_NUMBER" "$app/Contents/Info.plist"
           if [ -n "$SIGNING_IDENTITY" ]; then
             if [ "$DEVELOPER_ID" = "true" ]; then
               codesign --force --deep --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$app"
@@ -186,13 +202,22 @@ jobs:
           fi
 
       - name: Notarize and package macOS artifacts
-        if: ${{ steps.signing.outputs.developer_id == 'true' && env.APPLE_API_KEY_ID != '' && env.APPLE_API_ISSUER_ID != '' && env.APPLE_API_PRIVATE_KEY_BASE64 != '' }}
+        if: ${{ steps.signing.outputs.developer_id == 'true' }}
         shell: bash
         env:
           SIGNING_IDENTITY: ${{ steps.signing.outputs.identity }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_PRIVATE_KEY_BASE64: ${{ secrets.APPLE_API_PRIVATE_KEY_BASE64 }}
         run: |
+          if [ -z "$APPLE_API_KEY_ID" ] || [ -z "$APPLE_API_ISSUER_ID" ] || [ -z "$APPLE_API_PRIVATE_KEY_BASE64" ]; then
+            echo "Apple notarization secrets not configured; skipping notarization"
+            exit 0
+          fi
           app="desktop/target/aarch64-apple-darwin/release/AgentPad.app"
           key_path="$RUNNER_TEMP/AuthKey_$APPLE_API_KEY_ID.p8"
+          trap 'rm -f "$key_path"' EXIT
+          umask 077
           printf '%s' "$APPLE_API_PRIVATE_KEY_BASE64" | openssl base64 -d -A -out "$key_path"
           xcrun notarytool submit agentpad-macos-arm64.zip \
             --key "$key_path" \
@@ -213,6 +238,15 @@ jobs:
           xcrun stapler validate "$app"
           xcrun stapler validate agentpad-macos-arm64.dmg
 
+      - name: Remove macOS signing keychain
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          keychain_path="$RUNNER_TEMP/agentpad-signing.keychain-db"
+          if [ -f "$keychain_path" ]; then
+            security delete-keychain "$keychain_path"
+          fi
+
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -228,10 +262,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       AGENTPAD_VERSION: ${{ needs.prepare-version.outputs.version }}
-      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -248,10 +278,25 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Configure Android release signing
-        if: ${{ env.ANDROID_KEYSTORE_BASE64 != '' && env.ANDROID_KEYSTORE_PASSWORD != '' && env.ANDROID_KEY_ALIAS != '' && env.ANDROID_KEY_PASSWORD != '' }}
-        shell: bash
+      - name: Test Android application
+        working-directory: android
         run: |
+          flutter pub get
+          flutter test
+
+      - name: Configure Android release signing
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ] || [ -z "$ANDROID_KEYSTORE_PASSWORD" ] || [ -z "$ANDROID_KEY_ALIAS" ] || [ -z "$ANDROID_KEY_PASSWORD" ]; then
+            echo "Android signing secrets not configured; using debug key"
+            exit 0
+          fi
+          umask 077
           printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/android/app/agentpad-release.jks
           printf '%s\n' \
             "storeFile=agentpad-release.jks" \
@@ -259,12 +304,6 @@ jobs:
             "keyAlias=$ANDROID_KEY_ALIAS" \
             "keyPassword=$ANDROID_KEY_PASSWORD" \
             > android/android/key.properties
-
-      - name: Test Android application
-        working-directory: android
-        run: |
-          flutter pub get
-          flutter test
 
       - name: Build Android APK
         working-directory: android
@@ -275,6 +314,11 @@ jobs:
             --dart-define=AGENTPAD_VERSION="$AGENTPAD_VERSION"
           cp build/app/outputs/flutter-apk/app-release.apk ../agentpad.apk
 
+      - name: Remove Android signing files
+        if: ${{ always() }}
+        shell: bash
+        run: rm -f android/android/app/agentpad-release.jks android/android/key.properties
+
       - name: Upload Android artifact
         uses: actions/upload-artifact@v7
         with:
@@ -284,6 +328,8 @@ jobs:
 
   create-release:
     name: Publish GitHub Release
+    permissions:
+      contents: write
     needs:
       - prepare-version
       - build-windows
