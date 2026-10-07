@@ -105,11 +105,13 @@ pub fn enabled() -> bool {
 }
 
 pub fn is_elevated() -> bool {
-    #[cfg(windows)]
+    // Tests always run as "not elevated": CI Windows runners are administrators, and
+    // an elevated test process would take the Program Files code paths.
+    #[cfg(all(windows, not(test)))]
     {
         unsafe { windows::Win32::UI::Shell::IsUserAnAdmin().as_bool() }
     }
-    #[cfg(not(windows))]
+    #[cfg(any(not(windows), test))]
     {
         false
     }
