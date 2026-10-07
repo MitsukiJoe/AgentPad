@@ -14,7 +14,7 @@ plugins {
 }
 
 android {
-    namespace = "app.agentpad"
+    namespace = "app.agentspads"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -24,8 +24,8 @@ android {
     }
 
     defaultConfig {
-        applicationId = "app.agentpad"
-        testInstrumentationRunner = "app.agentpad.InputConnectionChecks"
+        applicationId = "app.agentspads"
+        testInstrumentationRunner = "app.agentspads.InputConnectionChecks"
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode

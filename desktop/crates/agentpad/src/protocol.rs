@@ -14,12 +14,20 @@ pub struct QrPayload {
     pub port: u16,
     pub name: String,
     pub os: String,
+    pub secret: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ips: Vec<String>,
 }
 
 impl QrPayload {
-    pub fn new(device_id: String, name: String, os: String, ip: String, ips: Vec<String>) -> Self {
+    pub fn new(
+        device_id: String,
+        name: String,
+        os: String,
+        secret: String,
+        ip: String,
+        ips: Vec<String>,
+    ) -> Self {
         Self {
             v: QR_VERSION,
             kind: QR_TYPE.to_string(),
@@ -28,6 +36,7 @@ impl QrPayload {
             port: PORT,
             name,
             os,
+            secret,
             ips,
         }
     }
@@ -40,6 +49,13 @@ pub enum InMsg {
     Hello {
         client_id: String,
         client_name: String,
+        auth: String,
+    },
+    #[serde(rename = "pair")]
+    Pair {
+        client_id: String,
+        client_name: String,
+        code: String,
     },
     #[serde(rename = "text")]
     Text {
@@ -71,6 +87,8 @@ pub enum InMsg {
 #[derive(Debug, Serialize, Clone, PartialEq)]
 #[serde(tag = "type")]
 pub enum OutMsg {
+    #[serde(rename = "challenge")]
+    Challenge { nonce: String, device_id: String },
     #[serde(rename = "connected")]
     Connected {
         device_id: String,
@@ -79,7 +97,11 @@ pub enum OutMsg {
         sync_enabled: bool,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         ips: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        secret: Option<String>,
     },
+    #[serde(rename = "auth_failed")]
+    AuthFailed { reason: &'static str },
     #[serde(rename = "ack")]
     Ack { ok: bool, clear_input: bool },
     #[serde(rename = "pong")]
@@ -98,11 +120,21 @@ mod tests {
             "id".into(),
             "Mac".into(),
             "macos".into(),
+            "s".into(),
             "192.168.1.2".into(),
             vec!["192.168.1.2".into(), "10.0.0.5".into()],
         );
         let v = serde_json::to_value(&q).unwrap();
-        for key in ["v", "type", "device_id", "ip", "port", "name", "os"] {
+        for key in [
+            "v",
+            "type",
+            "device_id",
+            "ip",
+            "port",
+            "name",
+            "os",
+            "secret",
+        ] {
             assert!(v.get(key).is_some(), "missing {key}");
         }
         assert_eq!(v["v"], 1);
@@ -118,6 +150,7 @@ mod tests {
             "id".into(),
             "Mac".into(),
             "macos".into(),
+            "s".into(),
             "192.168.1.2".into(),
             vec!["192.168.1.2".into(), "10.0.0.5".into()],
         );
@@ -130,10 +163,20 @@ mod tests {
 
     #[test]
     fn parse_client_messages() {
-        let hello: InMsg =
-            serde_json::from_str(r#"{"type":"hello","client_id":"c","client_name":"phone"}"#)
-                .unwrap();
+        let hello: InMsg = serde_json::from_str(
+            r#"{"type":"hello","client_id":"c","client_name":"phone","auth":"ab"}"#,
+        )
+        .unwrap();
         assert!(matches!(hello, InMsg::Hello { .. }));
+        assert!(serde_json::from_str::<InMsg>(
+            r#"{"type":"hello","client_id":"c","client_name":"phone"}"#
+        )
+        .is_err());
+        let pair: InMsg = serde_json::from_str(
+            r#"{"type":"pair","client_id":"c","client_name":"phone","code":"0420"}"#,
+        )
+        .unwrap();
+        assert!(matches!(pair, InMsg::Pair { code: ref c, .. } if c == "0420"));
         let text: InMsg = serde_json::from_str(
             r#"{"type":"text","content":"hi","auto_enter":true,"send_mode":"submit"}"#,
         )
@@ -164,11 +207,13 @@ mod tests {
             os: "macos".into(),
             sync_enabled: true,
             ips: vec!["192.168.1.2".into()],
+            secret: None,
         };
         let v = serde_json::to_value(&msg).unwrap();
         for key in ["type", "device_id", "name", "os", "sync_enabled", "ips"] {
             assert!(v.get(key).is_some(), "missing {key}");
         }
         assert_eq!(v["type"], "connected");
+        assert!(v.get("secret").is_none());
     }
 }

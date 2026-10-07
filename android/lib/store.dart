@@ -13,6 +13,8 @@ class Device {
     required this.port,
     this.os = '',
     this.selected = true,
+    this.secret = '',
+    this.pairCode = '',
   });
 
   String deviceId;
@@ -22,6 +24,18 @@ class Device {
   String os;
   bool selected;
 
+  /// 电脑下发的长期配对密钥（扫码或配对码成功后获得）。
+  String secret;
+
+  /// 手动添加时输入的一次性配对码；只在内存中，用过或被拒即清空。
+  String pairCode;
+
+  /// 电脑拒绝了密钥或配对码；停止重连，直到重新扫码或输入配对码。
+  bool needsPairing = false;
+
+  bool get canAuthenticate =>
+      !needsPairing && (secret.isNotEmpty || pairCode.isNotEmpty);
+
   Map<String, dynamic> toJson() => {
     'device_id': deviceId,
     'name': name,
@@ -29,6 +43,7 @@ class Device {
     'port': port,
     'os': os,
     'selected': selected,
+    'secret': secret,
   };
 
   static Device fromJson(Map<String, dynamic> j) => Device(
@@ -41,6 +56,7 @@ class Device {
     port: (j['port'] as num?)?.toInt() ?? kPort,
     os: j['os'] as String? ?? '',
     selected: j['selected'] as bool? ?? true,
+    secret: j['secret'] as String? ?? '',
   );
 
   /// Merge IPs / id / port. Display [name] stays unless this device has none.
@@ -56,6 +72,8 @@ class Device {
       port: other.port,
       os: other.os.isNotEmpty ? other.os : os,
       selected: selected,
+      secret: other.secret.isNotEmpty ? other.secret : secret,
+      pairCode: (other.secret.isNotEmpty || other.pairCode.isNotEmpty) ? other.pairCode : pairCode,
     );
   }
 }
@@ -64,8 +82,14 @@ List<Device> upsertDevice(List<Device> list, Device incoming) {
   if (incoming.deviceId.isNotEmpty) {
     final byId = list.indexWhere((d) => d.deviceId == incoming.deviceId);
     if (byId >= 0) {
+      final id = incoming.deviceId;
+      var merged = list[byId].merge(incoming);
+      for (var i = byId + 1; i < list.length; i++) {
+        if (list[i].deviceId == id) merged = merged.merge(list[i]);
+      }
       final next = [...list];
-      next[byId] = next[byId].merge(incoming);
+      next[byId] = merged;
+      next.removeWhere((d) => !identical(d, merged) && d.deviceId == id);
       return next;
     }
   }

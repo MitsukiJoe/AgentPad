@@ -10,6 +10,8 @@ fn main() {
             .set_product_version(version)
             .add_string("FileVersion", &version_text)
             .add_string("ProductVersion", &version_text)
+            .add_string("ProductName", "AgentsPads")
+            .add_string("FileDescription", "AgentsPads")
             .add_icon(32512, embedinator::Icon::from_png_bytes(icon))
             .finish();
         println!("cargo:rerun-if-changed=agentpad-icon.png");

@@ -5,17 +5,17 @@
   <key>CFBundleDevelopmentRegion</key>
   <string>zh_CN</string>
   <key>CFBundleDisplayName</key>
-  <string>AgentPad</string>
+  <string>AgentsPads</string>
   <key>CFBundleExecutable</key>
   <string>agentpad</string>
   <key>CFBundleIconFile</key>
   <string>AgentPad.icns</string>
   <key>CFBundleIdentifier</key>
-  <string>app.agentpad</string>
+  <string>app.agentspads</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>AgentPad</string>
+  <string>AgentsPads</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
@@ -27,7 +27,7 @@
   <key>LSUIElement</key>
   <true/>
   <key>NSAccessibilityUsageDescription</key>
-  <string>AgentPad 使用辅助功能从手机发送按键并控制指针。</string>
+  <string>AgentsPads 使用辅助功能从手机发送按键并控制指针。</string>
   <key>NSHighResolutionCapable</key>
   <true/>
 </dict>

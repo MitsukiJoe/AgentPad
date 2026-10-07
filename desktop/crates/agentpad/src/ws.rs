@@ -9,13 +9,19 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::handle::{self, Conn};
 use crate::identity::Identity;
+use crate::pairing::{self, Pairing};
 use crate::protocol::{InMsg, OutMsg};
 
 const POST_UPDATE_BIND_ATTEMPTS: usize = 50;
 const POST_UPDATE_BIND_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+const AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const MAX_AUTH_BYTES: usize = 4 * 1024;
 
 pub struct AppState {
+    /// `identity.secret` 只是启动时的值；当前密钥以 `secret()` 为准。
     pub identity: Identity,
+    secret: Mutex<String>,
+    pub pairing: Mutex<Pairing>,
     pub paused: AtomicBool,
     pub clients: Mutex<Vec<mpsc::UnboundedSender<OutMsg>>>,
 }
@@ -23,10 +29,46 @@ pub struct AppState {
 impl AppState {
     pub fn new(identity: Identity) -> Arc<Self> {
         Arc::new(Self {
+            secret: Mutex::new(identity.secret.clone()),
             identity,
+            pairing: Mutex::new(Pairing::default()),
             paused: AtomicBool::new(false),
             clients: Mutex::new(Vec::new()),
         })
+    }
+
+    pub fn secret(&self) -> String {
+        self.secret.lock().unwrap().clone()
+    }
+
+    /// 换新长期密钥并断开所有已配对连接；手机需重新扫码或输入配对码。
+    pub fn reset_secret(&self) -> std::io::Result<()> {
+        let secret = pairing::random_hex(32);
+        crate::identity::save(&Identity {
+            secret: secret.clone(),
+            ..self.identity.clone()
+        })?;
+        self.replace_secret(secret);
+        Ok(())
+    }
+
+    fn replace_secret(&self, secret: String) {
+        *self.secret.lock().unwrap() = secret;
+        self.clients.lock().unwrap().clear();
+    }
+
+    /// 首条文本必须是 hello（HMAC）或 pair（配对码）；成功时 pair 返回要下发的密钥。
+    fn authenticate(&self, nonce: &str, first: InMsg) -> Result<Option<String>, &'static str> {
+        match first {
+            InMsg::Hello { auth, .. } => pairing::verify_auth(&self.secret(), nonce, &auth)
+                .then_some(None)
+                .ok_or("bad_auth"),
+            InMsg::Pair { code, .. } => {
+                let ok = self.pairing.lock().unwrap().try_code(&code);
+                ok.then(|| Some(self.secret())).ok_or("bad_code")
+            }
+            _ => Err("unauthenticated"),
+        }
     }
 
     pub fn sync_enabled(&self) -> bool {
@@ -172,6 +214,56 @@ async fn handle_socket(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     enable_pointer_tcp(&stream);
     let mut ws = tokio_tungstenite::accept_async(stream).await?;
+    let nonce = pairing::random_hex(16);
+    let challenge = OutMsg::Challenge {
+        nonce: nonce.clone(),
+        device_id: state.identity.device_id.clone(),
+    };
+    ws.send(Message::Text(serde_json::to_string(&challenge)?.into()))
+        .await?;
+    let first = tokio::time::timeout(AUTH_TIMEOUT, async {
+        while let Some(Ok(frame)) = ws.next().await {
+            match frame {
+                Message::Text(text) => return Some(text),
+                Message::Close(_) => return None,
+                _ => {}
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten();
+    let first = first
+        .filter(|text| text.len() <= MAX_AUTH_BYTES)
+        .and_then(|text| serde_json::from_str::<InMsg>(&text).ok());
+    let (tx, mut rx) = mpsc::unbounded_channel::<OutMsg>();
+    let verdict = first.map_or(Err("unauthenticated"), |msg| {
+        let mut clients = state.clients.lock().unwrap();
+        let verdict = state.authenticate(&nonce, msg);
+        if verdict.is_ok() {
+            clients.retain(|t| !t.is_closed());
+            clients.push(tx);
+        }
+        verdict
+    });
+    let secret = match verdict {
+        Ok(secret) => secret,
+        Err(reason) => {
+            crate::logutil::write("connection auth failed");
+            let failed = OutMsg::AuthFailed { reason };
+            let _ = ws
+                .send(Message::Text(serde_json::to_string(&failed)?.into()))
+                .await;
+            let _ = ws.close(None).await;
+            return Ok(());
+        }
+    };
+    crate::logutil::write(if secret.is_some() {
+        "connection pair ok"
+    } else {
+        "connection auth ok"
+    });
     let ips: Vec<String> = crate::net::list_nics().into_iter().map(|n| n.ip).collect();
     let connected = OutMsg::Connected {
         device_id: state.identity.device_id.clone(),
@@ -179,12 +271,10 @@ async fn handle_socket(
         os: agentpad_input::os().to_string(),
         sync_enabled: state.sync_enabled(),
         ips,
+        secret,
     };
     ws.send(Message::Text(serde_json::to_string(&connected)?.into()))
         .await?;
-
-    let (tx, mut rx) = mpsc::unbounded_channel::<OutMsg>();
-    state.clients.lock().unwrap().push(tx);
 
     let (mut sink, mut source) = ws.split();
     let mut conn = Conn::default();
@@ -394,10 +484,7 @@ mod tests {
     async fn ordinary_second_instance_does_not_retry() {
         let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = held.local_addr().unwrap();
-        let state = AppState::new(Identity {
-            device_id: "dev-1".into(),
-            name: "TestMac".into(),
-        });
+        let state = AppState::new(test_identity());
         let err = serve_with_retry(state, addr, false).await.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
     }
@@ -410,28 +497,197 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(150));
             drop(held);
         });
-        let state = AppState::new(Identity {
-            device_id: "dev-1".into(),
-            name: "TestMac".into(),
-        });
+        let state = AppState::new(test_identity());
         let bound = serve_with_retry(state, addr, true).await.unwrap();
         release.join().unwrap();
         assert_eq!(bound, addr);
     }
 
-    #[tokio::test]
-    async fn connect_receives_connected() {
-        let state = AppState::new(Identity {
+    fn test_identity() -> Identity {
+        Identity {
             device_id: "dev-1".into(),
             name: "TestMac".into(),
-        });
-        let addr = serve(state, "127.0.0.1:0".parse().unwrap()).await.unwrap();
+            secret: "s3cret".into(),
+        }
+    }
+
+    type Client = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    async fn next_json(ws: &mut Client) -> Option<serde_json::Value> {
+        loop {
+            match ws.next().await? {
+                Ok(Message::Text(text)) => return Some(serde_json::from_str(&text).unwrap()),
+                Ok(Message::Close(_)) | Err(_) => return None,
+                Ok(_) => {}
+            }
+        }
+    }
+
+    /// 连接并以首条消息 `first(nonce)` 回应挑战，返回连接与服务端回复。
+    async fn open(
+        addr: SocketAddr,
+        first: impl FnOnce(&str) -> String,
+    ) -> (Client, Option<serde_json::Value>) {
         let (mut ws, _) = connect_async(format!("ws://{addr}")).await.unwrap();
-        let msg = ws.next().await.unwrap().unwrap();
-        let Message::Text(text) = msg else {
-            panic!("not text")
-        };
-        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let challenge = next_json(&mut ws).await.unwrap();
+        assert_eq!(challenge["type"], "challenge");
+        assert_eq!(challenge["device_id"], "dev-1");
+        let nonce = challenge["nonce"].as_str().unwrap().to_string();
+        assert_eq!(nonce.len(), 32);
+        ws.send(Message::Text(first(&nonce).into())).await.unwrap();
+        let reply = next_json(&mut ws).await;
+        (ws, reply)
+    }
+
+    fn hello(secret: &str, nonce: &str) -> String {
+        format!(
+            r#"{{"type":"hello","client_id":"c","client_name":"Android","auth":"{}"}}"#,
+            pairing::auth_tag(secret, nonce)
+        )
+    }
+
+    fn pair(code: &str) -> String {
+        format!(r#"{{"type":"pair","client_id":"c","client_name":"Android","code":"{code}"}}"#)
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_clients_are_rejected_before_any_input() {
+        let state = AppState::new(test_identity());
+        let addr = serve(state.clone(), "127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        for (first, reason) in [
+            (
+                r#"{"type":"text","content":"x","auto_enter":true,"send_mode":"submit"}"#
+                    .to_string(),
+                "unauthenticated",
+            ),
+            (r#"{"type":"ping"}"#.to_string(), "unauthenticated"),
+            (hello("wrong", "n"), "bad_auth"),
+            (pair("0000"), "bad_code"),
+        ] {
+            let (mut ws, reply) = open(addr, |_| first).await;
+            let reply = reply.unwrap();
+            assert_eq!(reply["type"], "auth_failed");
+            assert_eq!(reply["reason"], reason);
+            assert!(next_json(&mut ws).await.is_none());
+        }
+        assert!(state.clients.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn authentication_first_message_has_4kib_limit() {
+        let state = AppState::new(test_identity());
+        let addr = serve(state, "127.0.0.1:0".parse().unwrap()).await.unwrap();
+        for size in [4096, 4097, 1 << 20] {
+            let (mut ws, reply) = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                open(addr, |nonce| {
+                    let mut text = hello("s3cret", nonce);
+                    text.push_str(&" ".repeat(size - text.len()));
+                    text
+                }),
+            )
+            .await
+            .unwrap();
+            let reply = reply.unwrap();
+            if size == 4096 {
+                assert_eq!(reply["type"], "connected");
+            } else {
+                assert_eq!(reply["type"], "auth_failed", "size {size}");
+                assert_eq!(reply["reason"], "unauthenticated");
+                assert!(next_json(&mut ws).await.is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticated_long_text_is_not_subject_to_auth_limit() {
+        let state = AppState::new(test_identity());
+        state.set_paused(true);
+        let addr = serve(state, "127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let (mut ws, _connected) = open(addr, |nonce| hello("s3cret", nonce)).await;
+        let text = serde_json::json!({
+            "type": "text",
+            "content": "文".repeat(32_768),
+            "auto_enter": false,
+            "send_mode": "submit",
+        })
+        .to_string();
+        assert!(text.len() > 4096);
+        ws.send(Message::Text(text.into())).await.unwrap();
+        let ack = tokio::time::timeout(std::time::Duration::from_secs(5), next_json(&mut ws))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ack["type"], "ack");
+        assert_eq!(ack["ok"], false);
+        ws.send(Message::Text(r#"{"type":"ping"}"#.into()))
+            .await
+            .unwrap();
+        assert_eq!(next_json(&mut ws).await.unwrap()["type"], "pong");
+    }
+
+    #[tokio::test]
+    async fn secret_reset_rejects_pending_old_key_authentication() {
+        let state = AppState::new(test_identity());
+        let addr = serve(state.clone(), "127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let (mut pending, _) = connect_async(format!("ws://{addr}")).await.unwrap();
+        let challenge = next_json(&mut pending).await.unwrap();
+        let nonce = challenge["nonce"].as_str().unwrap();
+        state.replace_secret("new-secret".into());
+        pending
+            .send(Message::Text(hello("s3cret", nonce).into()))
+            .await
+            .unwrap();
+        let failed = next_json(&mut pending).await.unwrap();
+        assert_eq!(failed["type"], "auth_failed");
+        assert_eq!(failed["reason"], "bad_auth");
+        assert!(next_json(&mut pending).await.is_none());
+        let (_ws, reply) = open(addr, |nonce| hello("new-secret", nonce)).await;
+        assert_eq!(reply.unwrap()["type"], "connected");
+    }
+
+    #[tokio::test]
+    async fn pairing_code_hands_out_secret_once_and_reset_disconnects() {
+        let state = AppState::new(test_identity());
+        let addr = serve(state.clone(), "127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        state.pairing.lock().unwrap().set_window_open(true);
+        let code = state.pairing.lock().unwrap().code().unwrap().to_string();
+        let (_ws, reply) = open(addr, |_| pair(&code)).await;
+        let reply = reply.unwrap();
+        assert_eq!(reply["type"], "connected");
+        assert_eq!(reply["secret"], "s3cret");
+
+        let (_, reply) = open(addr, |_| pair(&code)).await;
+        assert_eq!(reply.unwrap()["reason"], "bad_code");
+
+        let (mut paired, reply) = open(addr, |n| hello("s3cret", n)).await;
+        let reply = reply.unwrap();
+        assert_eq!(reply["type"], "connected");
+        assert!(reply.get("secret").is_none());
+
+        state.replace_secret(pairing::random_hex(32));
+        assert!(next_json(&mut paired).await.is_none());
+        let (_, reply) = open(addr, |n| hello("s3cret", n)).await;
+        assert_eq!(reply.unwrap()["reason"], "bad_auth");
+        let secret = state.secret();
+        let (_, reply) = open(addr, |n| hello(&secret, n)).await;
+        assert_eq!(reply.unwrap()["type"], "connected");
+    }
+
+    #[tokio::test]
+    async fn connect_receives_connected() {
+        let state = AppState::new(test_identity());
+        let addr = serve(state, "127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let (_ws, v) = open(addr, |n| hello("s3cret", n)).await;
+        let v = v.unwrap();
         assert_eq!(v["type"], "connected");
         assert_eq!(v["device_id"], "dev-1");
         assert_eq!(v["name"], "TestMac");
@@ -441,14 +697,10 @@ mod tests {
 
     #[tokio::test]
     async fn ping_pong_and_paused_ack() {
-        let state = AppState::new(Identity {
-            device_id: "dev-1".into(),
-            name: "TestMac".into(),
-        });
+        let state = AppState::new(test_identity());
         state.set_paused(true);
         let addr = serve(state, "127.0.0.1:0".parse().unwrap()).await.unwrap();
-        let (mut ws, _) = connect_async(format!("ws://{addr}")).await.unwrap();
-        let _connected = ws.next().await.unwrap().unwrap();
+        let (mut ws, _connected) = open(addr, |n| hello("s3cret", n)).await;
         ws.send(Message::Text(r#"{"type":"ping"}"#.into()))
             .await
             .unwrap();

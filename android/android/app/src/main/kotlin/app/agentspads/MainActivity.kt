@@ -1,6 +1,8 @@
-package app.agentpad
+package app.agentspads
 
 import android.content.Context
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.media.AudioManager
 import android.net.ConnectivityManager
 import android.net.Network
@@ -297,6 +299,7 @@ class WifiWs(
                         DiagnosticLog.event(call.argument<String>("kind"), call.argument<String>("stage"), call.argument<String>("result"), call.argument<Int>("count") ?: 1)
                         result.success(null)
                     }
+                    "wsVisible" -> result.success(visible)
                     "connect" -> {
                         val id = call.argument<String>("id") ?: ""
                         val host = call.argument<String>("host") ?: ""
@@ -316,6 +319,7 @@ class WifiWs(
                         )
                         result.success(true)
                     }
+                    "cameraZoomRange" -> result.success(runCatching { cameraZoomRange() }.getOrDefault(listOf(1.0, 1.0)))
                     "displayRefreshHz" -> {
                         val hz = displayRefreshHz()
                         result.success(hz)
@@ -570,6 +574,21 @@ class WifiWs(
     }
 
     // Peak supported rate — current getRefreshRate() is often 60 while Flutter is mode-locked.
+    // Logical back camera's ratio range; CameraX switches physical lenses inside it.
+    private fun cameraZoomRange(): List<Double> {
+        val cm = ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        val c = cm.cameraIdList.asSequence()
+            .map { cm.getCameraCharacteristics(it) }
+            .firstOrNull { it.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK }
+            ?: return listOf(1.0, 1.0)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            c.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)?.let {
+                return listOf(it.lower.toDouble(), it.upper.toDouble())
+            }
+        }
+        return listOf(1.0, (c.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1f).toDouble())
+    }
+
     private fun displayRefreshHz(): Double {
         val display =
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {

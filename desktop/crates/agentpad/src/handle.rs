@@ -31,7 +31,7 @@ pub fn handle(
     msg: InMsg,
 ) -> (Vec<OutMsg>, Vec<Action>) {
     match msg {
-        InMsg::Hello { .. } => (vec![], vec![]),
+        InMsg::Hello { .. } | InMsg::Pair { .. } => (vec![], vec![]),
         InMsg::Ping => (vec![OutMsg::Pong { sync_enabled }], vec![]),
         InMsg::Text {
             content,
@@ -160,35 +160,82 @@ pub fn apply_actions(actions: &[Action]) {
         }
         return;
     }
-    let mut pasted = false;
+    run_actions(actions, |a| inject_action(a).is_ok());
+}
+
+/// 紧跟在文字后的 Enter：文字成功才等待后回车，文字失败则不回车，免得提交目标框里原有内容。
+fn run_actions(actions: &[Action], mut inject: impl FnMut(&Action) -> bool) {
+    let mut text_ok = None;
     for a in actions {
-        if pasted && matches!(a, Action::Enter) {
-            std::thread::sleep(Duration::from_millis(80));
-        }
-        let r = match a {
-            Action::Text(t) => agentpad_input::inject_text(t),
-            Action::Enter => agentpad_input::inject_key("Enter", &[]),
-            Action::Undo => agentpad_input::undo(),
-            Action::Key { key, modifiers } => {
-                let mods: Vec<&str> = modifiers.iter().map(|s| s.as_str()).collect();
-                agentpad_input::inject_key(key, &mods)
+        if matches!(a, Action::Enter) {
+            match text_ok {
+                Some(false) => {
+                    crate::logutil::operation(crate::logutil::action_category(a), true, false);
+                    text_ok = None;
+                    continue;
+                }
+                Some(true) => std::thread::sleep(Duration::from_millis(80)),
+                None => {}
             }
-            Action::Pointer {
-                dx,
-                dy,
-                buttons,
-                wheel,
-            } => agentpad_input::inject_pointer(*dx, *dy, *buttons, *wheel),
-        };
-        let succeeded = r.is_ok();
+        }
+        let succeeded = inject(a);
         crate::logutil::operation(crate::logutil::action_category(a), true, succeeded);
-        pasted = succeeded && matches!(a, Action::Text(_));
+        text_ok = matches!(a, Action::Text(_)).then_some(succeeded);
+    }
+}
+
+fn inject_action(a: &Action) -> Result<(), agentpad_input::Error> {
+    match a {
+        Action::Text(t) => agentpad_input::inject_text(t),
+        Action::Enter => agentpad_input::inject_key("Enter", &[]),
+        Action::Undo => agentpad_input::undo(),
+        Action::Key { key, modifiers } => {
+            let mods: Vec<&str> = modifiers.iter().map(|s| s.as_str()).collect();
+            agentpad_input::inject_key(key, &mods)
+        }
+        Action::Pointer {
+            dx,
+            dy,
+            buttons,
+            wheel,
+        } => agentpad_input::inject_pointer(*dx, *dy, *buttons, *wheel),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_text_cancels_following_enter_only() {
+        let mut sent = Vec::new();
+        let actions = [
+            Action::Text("a".into()),
+            Action::Enter,
+            Action::Enter,
+            Action::Text("b".into()),
+            Action::Enter,
+        ];
+        run_actions(&actions, |a| {
+            sent.push(a.clone());
+            !matches!(a, Action::Text(t) if t == "a")
+        });
+        assert_eq!(
+            sent,
+            [
+                Action::Text("a".into()),
+                Action::Enter,
+                Action::Text("b".into()),
+                Action::Enter,
+            ]
+        );
+        let mut sent = Vec::new();
+        run_actions(&[Action::Enter], |a| {
+            sent.push(a.clone());
+            true
+        });
+        assert_eq!(sent, [Action::Enter]);
+    }
 
     #[test]
     fn shadow_appends_only() {

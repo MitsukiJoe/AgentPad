@@ -1,4 +1,4 @@
-package app.agentpad
+package app.agentspads
 
 import android.app.Activity
 import android.app.Instrumentation

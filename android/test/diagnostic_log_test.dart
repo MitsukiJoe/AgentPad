@@ -166,7 +166,7 @@ void main() {
     final prefs = await SharedPreferences.getInstance();
     final before = prefs.getKeys();
     await tester.pumpWidget(
-      AgentPadApp(store: store, enableAutomaticUpdateChecks: false),
+      AgentsPadsApp(store: store, enableAutomaticUpdateChecks: false),
     );
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('设置'));

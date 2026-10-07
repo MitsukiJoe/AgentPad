@@ -1,5 +1,5 @@
 name: agentpad
-description: Android client for AgentPad.
+description: Android client for AgentsPads.
 publish_to: "none"
 version: 1.0.0+1
 
@@ -9,6 +9,7 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  crypto: ^3.0.7
   mobile_scanner: ^7.0.0
   shared_preferences: ^2.5.3
   web_socket_channel: ^3.0.3

@@ -10,6 +10,16 @@ embedinator = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 winit = "0.30"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tempfile = "3"
 
 [dependencies]
 agentpad-input = { path = "../agentpad-input" }
@@ -17,6 +27,8 @@ arboard = "3"
 eframe = "0.36"
 egui_material_icons = "0.8"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+getrandom = "0.3"
+hmac = "0.12"
 netdev = { version = "0.46.1", default-features = false }
 qrcode = { version = "0.14", default-features = false }
 serde = { version = "1", features = ["derive"] }

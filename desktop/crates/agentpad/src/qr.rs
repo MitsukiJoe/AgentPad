@@ -1,5 +1,5 @@
 use eframe::egui::{Color32, ColorImage};
-use qrcode::QrCode;
+use qrcode::{EcLevel, QrCode};
 
 pub const QR_PT: f32 = 260.0;
 
@@ -7,8 +7,11 @@ pub fn raster_px(scale: f32) -> u32 {
     (QR_PT * scale).round().max(1.0) as u32
 }
 
-pub fn color_image(payload: &str, px: u32, dark: bool) -> Result<ColorImage, String> {
-    let code = QrCode::new(payload.as_bytes()).map_err(|e| e.to_string())?;
+/// Always dark-on-light with an opaque quiet zone: phone decoders handle
+/// inverted codes poorly, and EC level L keeps on-screen modules large.
+pub fn color_image(payload: &str, px: u32) -> Result<ColorImage, String> {
+    let code = QrCode::with_error_correction_level(payload.as_bytes(), EcLevel::L)
+        .map_err(|e| e.to_string())?;
     let w = px as usize;
     let n = code.width();
     if n == 0 {
@@ -16,16 +19,18 @@ pub fn color_image(payload: &str, px: u32, dark: bool) -> Result<ColorImage, Str
     }
     let quiet = 4usize;
     let dim = n + quiet * 2;
-    let mark = if dark { Color32::WHITE } else { Color32::BLACK };
-    let mut pixels = vec![Color32::TRANSPARENT; w * w];
+    let mut pixels = vec![Color32::WHITE; w * w];
     for y in 0..w {
         for x in 0..w {
             let mx = x * dim / w;
             let my = y * dim / w;
-            if mx >= quiet && my >= quiet && mx < quiet + n && my < quiet + n {
-                if code[(mx - quiet, my - quiet)] == qrcode::Color::Dark {
-                    pixels[y * w + x] = mark;
-                }
+            if mx >= quiet
+                && my >= quiet
+                && mx < quiet + n
+                && my < quiet + n
+                && code[(mx - quiet, my - quiet)] == qrcode::Color::Dark
+            {
+                pixels[y * w + x] = Color32::BLACK;
             }
         }
     }
@@ -45,19 +50,26 @@ mod tests {
     }
 
     #[test]
-    fn renders_at_retina_pixels() {
-        let img = color_image("{\"v\":1}", 64, false).unwrap();
+    fn renders_black_on_opaque_white() {
+        let img = color_image("{\"v\":1}", 64).unwrap();
         assert_eq!(img.size, [64, 64]);
         assert!(img.pixels.iter().any(|p| *p == Color32::BLACK));
-        assert_eq!(img.pixels[0], Color32::TRANSPARENT);
-        assert_eq!(img.pixels[63], Color32::TRANSPARENT);
+        assert!(img
+            .pixels
+            .iter()
+            .all(|p| *p == Color32::BLACK || *p == Color32::WHITE));
+        assert_eq!(img.pixels[0], Color32::WHITE);
+        assert_eq!(img.pixels[63], Color32::WHITE);
     }
 
     #[test]
-    fn dark_inverts_modules() {
-        let img = color_image("{\"v\":1}", 64, true).unwrap();
-        assert!(img.pixels.iter().any(|p| *p == Color32::WHITE));
-        assert!(!img.pixels.iter().any(|p| *p == Color32::BLACK));
-        assert_eq!(img.pixels[0], Color32::TRANSPARENT);
+    fn pairing_payload_stays_low_version() {
+        let payload = r#"{"v":1,"type":"agentpad","device_id":"abcdefab-cdef-4abc-8def-abcdefabcdef","ip":"192.168.100.101","port":9618,"name":"Someone's MacBook Pro","os":"macos","secret":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#;
+        let code = QrCode::with_error_correction_level(payload, EcLevel::L).unwrap();
+        assert!(
+            code.width() <= 53,
+            "version too dense: {} modules",
+            code.width()
+        );
     }
 }

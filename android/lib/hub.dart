@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
@@ -26,8 +27,20 @@ class Hub {
       sync();
     } else {
       _stopLinks();
-      onChange?.call();
+      _notify();
     }
+  }
+
+  void restart() {
+    _stopLinks();
+    sync();
+  }
+
+  /// UI 回调异常不得打断连接循环。
+  void _notify() {
+    try {
+      onChange?.call();
+    } catch (_) {}
   }
 
   static String keyOf(Device d) => d.deviceId.isNotEmpty
@@ -45,10 +58,25 @@ class Hub {
     }
     for (final d in store.devices) {
       final k = keyOf(d);
-      links.putIfAbsent(k, () => PcLink(this, d, k)..start());
-      links[k]!.device = d;
+      final existing = links[k];
+      if (existing == null || existing._stop) {
+        links.remove(k);
+        online.remove(k);
+        existing?.stop();
+        links[k] = PcLink(this, d, k)..start();
+      } else {
+        existing.device = d;
+      }
     }
-    onChange?.call();
+    _notify();
+  }
+
+  /// Wake a backoff wait. A live session is left alone.
+  void nudge() {
+    if (!active) return;
+    for (final link in links.values.toList()) {
+      link.nudge();
+    }
   }
 
   Future<bool> sendTo(Device d, String json) async {
@@ -151,8 +179,13 @@ class PcLink {
   PcLink(this.hub, this.device, this.key);
 
   final Hub hub;
-  final String key;
+  String key;
   Device device;
+  static int fallbackSockets = 0;
+
+  /// No inbound frame for two of these periods closes the socket.
+  @visibleForTesting
+  static Duration silenceLimit = const Duration(seconds: 10);
   bool _stop = false;
   static int _nextTransportId = 0;
   Timer? _retryTimer;
@@ -162,6 +195,12 @@ class PcLink {
   void Function(String)? _sendFast;
   void Function(double, double, int, int, bool)? _sendPointer;
   Future<void> Function()? _close;
+  int _attempt = 0;
+  bool _identified = false;
+  bool _answered = false;
+  bool _waitingPong = false;
+  String? _pendingReply;
+  Timer? _silence;
 
   void start() {
     _stop = false;
@@ -169,10 +208,11 @@ class PcLink {
       while (!_stop) {
         var connected = false;
         for (final ip in device.ips) {
-          if (_stop) return;
+          if (_stop || !device.canAuthenticate) break;
           connected = await _try(ip, device.port);
           if (connected) break;
         }
+        if (_stop) return;
         if (!connected && !_stop) {
           final done = _retryDone = Completer<void>();
           _retryTimer = Timer(const Duration(seconds: 2), done.complete);
@@ -186,8 +226,13 @@ class PcLink {
 
   void stop() {
     _stop = true;
+    _silence?.cancel();
+    _silence = null;
     _retryTimer?.cancel();
-    if (_retryDone?.isCompleted == false) _retryDone!.complete();
+    final done = _retryDone;
+    _retryDone = null;
+    _retryTimer = null;
+    if (done != null && !done.isCompleted) done.complete();
     _wheelRemainder = 0;
     final c = _close;
     _close = null;
@@ -196,6 +241,16 @@ class PcLink {
     _sendPointer = null;
     if (identical(hub.links[key], this)) hub.online.remove(key);
     c?.call();
+  }
+
+  void nudge() {
+    if (_stop) return;
+    final done = _retryDone;
+    if (done == null || done.isCompleted) return;
+    _retryTimer?.cancel();
+    _retryTimer = null;
+    _retryDone = null;
+    done.complete();
   }
 
   bool get hasPointerPump => _sendPointer != null;
@@ -241,17 +296,26 @@ class PcLink {
 
   Future<bool> _try(String host, int port) async {
     final id = '$key:${_nextTransportId++}';
+    final attempt = ++_attempt;
+    _identified = false;
+    _answered = false;
+    _pendingReply = null;
     var session = false;
+    Timer? handshake;
+    void onText(String raw) {
+      if (attempt == _attempt) onServerMessage(raw);
+    }
+    void awaitIdentity() {
+      handshake = Timer(const Duration(seconds: 5), () {
+        if (attempt == _attempt && !_identified) unawaited(_close?.call());
+      });
+    }
     unawaited(DiagnosticLog.record(DiagnosticKind.connection, DiagnosticStage.start, DiagnosticResult.active));
     try {
+      NativeWs? native;
       try {
         _close = () => NativeWs.closeId(id);
-        final native = await NativeWs.connect(
-          id,
-          host,
-          port,
-          onText: _onServer,
-        );
+        native = await NativeWs.connect(id, host, port, onText: onText);
         if (_stop) {
           await native?.close();
           return false;
@@ -261,18 +325,21 @@ class PcLink {
           _sendFast = native.sendFast;
           _sendPointer = native.addPointer;
           _close = native.close;
-          hub.online.add(key);
-          hub.onChange?.call();
-          await native.send(helloMsg(hub.store.clientId, 'Android'));
+          awaitIdentity();
+          _flushReply();
           session = true;
           unawaited(DiagnosticLog.record(
             DiagnosticKind.connection, DiagnosticStage.start, DiagnosticResult.ok,
           ));
           await native.done;
-          return true;
+          return _identified;
         }
-      } catch (_) {}
-      if (_stop) return false;
+      } catch (_) {
+        // 原生连接已建立后出错：交给 finally 关闭，不再叠一条备用连接。
+        if (native != null) return _identified;
+      }
+      if (_stop || !await NativeWs.transportVisible) return false;
+      fallbackSockets++;
       final ch = WebSocketChannel.connect(Uri.parse('ws://$host:$port'));
       _close = () async => ch.sink.close();
       await ch.ready.timeout(const Duration(seconds: 4));
@@ -285,19 +352,23 @@ class PcLink {
         return true;
       };
       _sendFast = (String j) => ch.sink.add(j);
-      _close = () async => ch.sink.close();
-      hub.online.add(key);
-      hub.onChange?.call();
-      ch.sink.add(helloMsg(hub.store.clientId, 'Android'));
+      awaitIdentity();
+      _flushReply();
       session = true;
       unawaited(DiagnosticLog.record(DiagnosticKind.connection, DiagnosticStage.start, DiagnosticResult.ok));
       await for (final msg in ch.stream) {
-        if (msg is String) _onServer(msg);
+        if (msg is String) onText(msg);
       }
-      return true;
+      return _identified;
     } catch (_) {
-      return session;
+      return _identified;
     } finally {
+      handshake?.cancel();
+      _silence?.cancel();
+      _silence = null;
+      _identified = false;
+      _answered = false;
+      _pendingReply = null;
       unawaited(DiagnosticLog.record(DiagnosticKind.connection, DiagnosticStage.stop, session ? DiagnosticResult.ok : DiagnosticResult.failed));
       if (identical(hub.links[key], this)) hub.online.remove(key);
       final close = _close;
@@ -308,12 +379,35 @@ class PcLink {
       _sendFast = null;
       _sendPointer = null;
       _close = null;
-      if (identical(hub.links[key], this)) hub.onChange?.call();
+      if (identical(hub.links[key], this)) hub._notify();
     }
   }
 
-  void _onServer(String raw) {
+  /// 挑战可能早于原生 connect 返回到达，先缓存应答。
+  void _reply(String json) {
+    final send = _send;
+    if (send == null) {
+      _pendingReply = json;
+    } else {
+      unawaited(send(json));
+    }
+  }
+
+  void _flushReply() {
+    final json = _pendingReply;
+    _pendingReply = null;
+    if (json != null) _reply(json);
+  }
+
+  bool _isOtherPc(String did) =>
+      did.isEmpty || (device.deviceId.isNotEmpty && device.deviceId != did);
+
+  /// 仅当身份确认后才上线；已识别过的设备换了 device_id（如旧 IP 被另一台电脑占用）一律拒绝，
+  /// 且不向它发送任何凭据。
+  @visibleForTesting
+  void onServerMessage(String raw) {
     if (_stop) return;
+    _waitingPong = false;
     if (DiagnosticLog.enabled) {
       unawaited(DiagnosticLog.record(
         DiagnosticLog.classify(raw), DiagnosticStage.receive, DiagnosticResult.ok,
@@ -321,9 +415,42 @@ class PcLink {
     }
     try {
       final v = jsonDecode(raw);
-      if (v is Map && v['type'] == 'connected') {
+      if (v is! Map) return;
+      if (v['type'] == 'challenge') {
+        final nonce = v['nonce'] as String? ?? '';
+        if (_answered ||
+            nonce.isEmpty ||
+            _isOtherPc(v['device_id'] as String? ?? '') ||
+            !device.canAuthenticate) {
+          unawaited(_close?.call());
+          return;
+        }
+        _answered = true;
+        _reply(
+          device.pairCode.isNotEmpty
+              ? pairMsg(hub.store.clientId, 'Android', device.pairCode)
+              : helloMsg(
+                  hub.store.clientId,
+                  'Android',
+                  authTag(device.secret, nonce),
+                ),
+        );
+      } else if (v['type'] == 'auth_failed') {
+        if (!_answered) return;
+        device.pairCode = '';
+        device.needsPairing = true;
+        unawaited(_close?.call());
+        hub._notify();
+      } else if (v['type'] == 'connected') {
         final did = v['device_id'] as String? ?? '';
-        if (did.isNotEmpty) device.deviceId = did;
+        if (!_answered || _isOtherPc(did)) {
+          unawaited(_close?.call());
+          return;
+        }
+        final secret = v['secret'];
+        if (secret is String && secret.isNotEmpty) device.secret = secret;
+        device.pairCode = '';
+        device.deviceId = did;
         final os = v['os'] as String? ?? '';
         if (os.isNotEmpty) device.os = os;
         // Display name is user-owned; never overwrite from the PC hostname.
@@ -333,10 +460,44 @@ class PcLink {
             if (ip.isNotEmpty && !device.ips.contains(ip)) device.ips.add(ip);
           }
         }
+        _identified = true;
+        _armSilence();
+        hub.store.devices = upsertDevice(hub.store.devices, device);
+        device = hub.store.devices.firstWhere(
+          (d) => d.deviceId == did,
+          orElse: () => device,
+        );
+        _rekey(Hub.keyOf(device));
+        hub.online.add(key);
         hub.store.save();
-        hub.onChange?.call();
+        hub._notify();
       }
     } catch (_) {}
+  }
+
+  void _armSilence() {
+    _silence?.cancel();
+    _waitingPong = false;
+    final limit = silenceLimit;
+    _silence = Timer.periodic(limit, (_) {
+      if (_stop || !_identified) return;
+      if (_waitingPong) {
+        unawaited(_close?.call());
+        return;
+      }
+      _waitingPong = true;
+      _reply(pingMsg());
+    });
+  }
+
+  void _rekey(String next) {
+    if (next == key) return;
+    if (identical(hub.links[key], this)) hub.links.remove(key);
+    hub.online.remove(key);
+    key = next;
+    final previous = hub.links[key];
+    if (previous != null && !identical(previous, this)) previous.stop();
+    hub.links[key] = this;
   }
 }
 
@@ -397,6 +558,14 @@ class NativeWs {
         if (data != null) _texts[id]?.call(data);
       }
     });
+  }
+
+  static Future<bool> get transportVisible async {
+    try {
+      return await _m.invokeMethod<bool>('wsVisible') ?? true;
+    } catch (_) {
+      return true;
+    }
   }
 
   static Future<NativeWs?> connect(

@@ -162,6 +162,7 @@ pub fn input_category(msg: &crate::protocol::InMsg) -> &'static str {
         InMsg::Pointer { .. } => "[鼠标位移][鼠标按键][滚轮]",
         InMsg::Undo => "undo",
         InMsg::Hello { .. } => "hello",
+        InMsg::Pair { .. } => "pair",
         InMsg::Ping => "ping",
     }
 }

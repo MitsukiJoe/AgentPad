@@ -55,6 +55,8 @@ fn sync_entry(path: &Path, contents: &str, enabled: bool) -> std::io::Result<()>
 
 fn sync_system(enabled: bool) -> std::io::Result<()> {
     let exe = std::env::current_exe()?;
+    #[cfg(windows)]
+    let exe = crate::elevation::launcher_for_autostart(exe);
     #[cfg(target_os = "macos")]
     {
         let app = app_bundle_for_exe(&exe).ok_or_else(|| {
@@ -64,7 +66,7 @@ fn sync_system(enabled: bool) -> std::io::Result<()> {
             )
         })?;
         let path = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
-            .join("Library/LaunchAgents/app.agentpad.plist");
+            .join("Library/LaunchAgents/app.agentspads.plist");
         sync_entry(&path, &macos_plist(&app), enabled)
     }
     #[cfg(windows)]
@@ -73,7 +75,7 @@ fn sync_system(enabled: bool) -> std::io::Result<()> {
             std::io::Error::new(std::io::ErrorKind::NotFound, "APPDATA is unavailable")
         })?;
         let path = PathBuf::from(appdata)
-            .join("Microsoft/Windows/Start Menu/Programs/Startup/AgentPad.bat");
+            .join("Microsoft/Windows/Start Menu/Programs/Startup/AgentsPads.bat");
         let bat = format!("@echo off\r\nstart \"\" \"{}\"\r\n", exe.display());
         sync_entry(&path, &bat, enabled)
     }
@@ -105,7 +107,7 @@ fn macos_plist(app: &Path) -> String {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>app.agentpad</string>
+  <key>Label</key><string>app.agentspads</string>
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/open</string>
@@ -155,10 +157,10 @@ mod tests {
 
     #[test]
     fn finds_macos_app_bundle_from_executable() {
-        let exe = std::path::Path::new("/Applications/AgentPad.app/Contents/MacOS/agentpad");
+        let exe = std::path::Path::new("/Applications/AgentsPads.app/Contents/MacOS/agentpad");
         assert_eq!(
             app_bundle_for_exe(exe),
-            Some(std::path::PathBuf::from("/Applications/AgentPad.app")),
+            Some(std::path::PathBuf::from("/Applications/AgentsPads.app")),
         );
         assert_eq!(
             app_bundle_for_exe(std::path::Path::new("/tmp/agentpad")),
@@ -168,9 +170,9 @@ mod tests {
 
     #[test]
     fn macos_plist_opens_app_bundle() {
-        let body = macos_plist(std::path::Path::new("/Applications/AgentPad.app"));
+        let body = macos_plist(std::path::Path::new("/Applications/AgentsPads.app"));
         assert!(body.contains("<string>/usr/bin/open</string>"));
         assert!(body.contains("<string>-g</string>"));
-        assert!(body.contains("<string>/Applications/AgentPad.app</string>"));
+        assert!(body.contains("<string>/Applications/AgentsPads.app</string>"));
     }
 }

@@ -13,6 +13,7 @@ import 'package:flutter/services.dart'
         MethodChannel,
         SystemChrome;
 
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
@@ -26,10 +27,9 @@ import 'store.dart';
 import 'touchpad.dart';
 import 'voice_input.dart';
 
-const appVersion = String.fromEnvironment(
-  'AGENTPAD_VERSION',
-  defaultValue: '0.1.0',
-);
+const appVersion = kDebugMode
+    ? 'debug'
+    : String.fromEnvironment('AGENTPAD_VERSION', defaultValue: '0.1.0');
 
 class AndroidUpdateInfo {
   const AndroidUpdateInfo({
@@ -50,28 +50,33 @@ class AndroidUpdateInfo {
 List<Uri> androidUpdateManifestUris([DateTime? now]) {
   final hour =
       (now ?? DateTime.now()).toUtc().millisecondsSinceEpoch ~/ 3600000;
-  const path = 'gh/MitsukiJoe/AgentPad@update-manifest/agentpad-update.json';
+  const path = 'gh/MitsukiJoe/AgentsPads@update-manifest/agentspads-update.json';
   return [
     Uri.parse(
-      'https://github.com/MitsukiJoe/AgentPad/releases/latest/download/agentpad-update.json',
+      'https://github.com/MitsukiJoe/AgentsPads/releases/latest/download/agentspads-update.json',
     ),
     Uri.parse('https://cdn.jsdelivr.net/$path?hour=$hour'),
     Uri.parse('https://cdn.jsdmirror.com/$path?hour=$hour'),
   ];
 }
 
+/// 只接受 `X.Y.Z` 纯 ASCII 数字；版本会拼进下载 URL，不能带任何路径字符。
+List<int>? parseAppVersion(String value) {
+  if (!RegExp(r'^[0-9]+\.[0-9]+\.[0-9]+$').hasMatch(value)) return null;
+  final parts = value.split('.').map(int.tryParse).toList();
+  return parts.contains(null) ? null : parts.cast<int>();
+}
+
 bool isNewerAppVersion(String remote, String current) {
-  List<int> parse(String value) => value
-      .split('.')
-      .map((part) => int.tryParse(part.replaceAll(RegExp(r'\D'), '')) ?? 0)
-      .toList();
-  final remoteParts = parse(remote);
-  final currentParts = parse(current);
-  for (var i = 0; i < remoteParts.length && i < currentParts.length; i++) {
-    if (remoteParts[i] > currentParts[i]) return true;
-    if (remoteParts[i] < currentParts[i]) return false;
+  final remoteParts = parseAppVersion(remote);
+  final currentParts = parseAppVersion(current);
+  if (remoteParts == null || currentParts == null) return false;
+  for (var i = 0; i < 3; i++) {
+    if (remoteParts[i] != currentParts[i]) {
+      return remoteParts[i] > currentParts[i];
+    }
   }
-  return remoteParts.length > currentParts.length;
+  return false;
 }
 
 AndroidUpdateInfo newerAndroidUpdate(
@@ -97,13 +102,15 @@ AndroidUpdateInfo? parseAndroidUpdateManifest(String raw) {
     final body = data['body'] as String? ?? '';
     final assets = data['assets'] as Map;
     final android = assets['android'];
-    if (android is! Map || tagName != 'v$version' || version.isEmpty) {
+    if (android is! Map ||
+        tagName != 'v$version' ||
+        parseAppVersion(version) == null) {
       return null;
     }
     final apkUrl = android['url'] as String? ?? '';
     final sha256 = (android['sha256'] as String? ?? '').toLowerCase();
     final expectedUrl =
-        'https://github.com/MitsukiJoe/AgentPad/releases/download/$tagName/agentpad.apk';
+        'https://github.com/MitsukiJoe/AgentsPads/releases/download/$tagName/agentspads.apk';
     if (apkUrl != expectedUrl || !RegExp(r'^[0-9a-f]{64}$').hasMatch(sha256)) {
       return null;
     }
@@ -119,8 +126,8 @@ AndroidUpdateInfo? parseAndroidUpdateManifest(String raw) {
   }
 }
 
-class AgentPadApp extends StatefulWidget {
-  const AgentPadApp({
+class AgentsPadsApp extends StatefulWidget {
+  const AgentsPadsApp({
     super.key,
     this.store,
     this.enableAutomaticUpdateChecks = true,
@@ -130,10 +137,10 @@ class AgentPadApp extends StatefulWidget {
   final bool enableAutomaticUpdateChecks;
 
   @override
-  State<AgentPadApp> createState() => _AgentPadAppState();
+  State<AgentsPadsApp> createState() => _AgentsPadsAppState();
 }
 
-class _AgentPadAppState extends State<AgentPadApp> {
+class _AgentsPadsAppState extends State<AgentsPadsApp> {
   late final PadStore store;
   var ready = false;
 
@@ -166,7 +173,7 @@ class _AgentPadAppState extends State<AgentPadApp> {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'AgentPad',
+      title: 'AgentsPads',
       theme: _appTheme(Brightness.light),
       darkTheme: _appTheme(Brightness.dark),
       themeMode: switch (store.theme) {
@@ -214,6 +221,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   late final PadStore store;
   Hub? hub;
+  VoidCallback? _refreshConnectedSheet;
   final input = TextEditingController();
   final inputFocus = FocusNode();
   final pointer = PointerCoalescer();
@@ -266,6 +274,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       active: _connectionsActive,
       onChange: () {
         if (mounted) setState(() {});
+        _refreshConnectedSheet?.call();
       },
     );
     input.addListener(_onInputChanged);
@@ -307,6 +316,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     hub?.setActive(_connectionsActive);
+    if (_connectionsActive && state == AppLifecycleState.resumed) {
+      hub?.nudge();
+    }
     if (!_connectionsActive) {
       _stopTrackPoint();
       pointerTimer?.cancel();
@@ -975,9 +987,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       builder: (ctx) => AlertDialog(
         title: const Text('语音自动发送说明'),
         content: const Text(
-          'AgentPad 只在输入框聚焦后检测到 Android 录音活动，或输入法明确声明 voice 模式时，才把本次输入视为语音；手打组字和粘贴不会单独触发。\n\n'
+          'AgentsPads 只在输入框聚焦后检测到 Android 录音活动，或输入法明确声明 voice 模式时，才把本次输入视为语音；手打组字和粘贴不会单独触发。\n\n'
           '语音结束组字后会按设置等待，默认等待 0.5 秒。保留这段等待，是为了让带有 AI 自动整理排版功能的语音输入法有充裕时间完成文字的排列和重组；等待期间文字继续变化会重新计时。\n\n'
-          'Android 会向普通应用隐藏录音来源。如果其他应用恰好在 AgentPad 输入框聚焦期间开始录音，理论上仍可能被判为语音。',
+          'Android 会向普通应用隐藏录音来源。如果其他应用恰好在 AgentsPads 输入框聚焦期间开始录音，理论上仍可能被判为语音。',
         ),
         actions: [
           TextButton(
@@ -1133,10 +1145,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text('关于 AgentPad', style: TextStyle(fontSize: 20)),
+          Text('关于 AgentsPads', style: TextStyle(fontSize: 20)),
           SizedBox(height: 16),
           Text(
-            'AgentPad 把 Android 手机变成 Windows 与 macOS 的局域网控制面。可以发送文字、快捷键和相对指针操作；连接不经过云端，也不需要账号。',
+            'AgentsPads 把 Android 手机变成 Windows 与 macOS 的局域网控制面。可以发送文字、快捷键和相对指针操作；连接不经过云端，也不需要账号。',
           ),
           SizedBox(height: 20),
           Text('撤回的限制', style: TextStyle(fontSize: 16)),
@@ -2528,6 +2540,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     bool notify = true,
     VoidCallback? refresh,
   }) async {
+    if (parseAppVersion(appVersion) == null) {
+      if (notify) _showUpdateNotice('调试版不检查更新');
+      return;
+    }
     if (checkingUpdate) {
       if (notify) _showUpdateNotice('正在检查更新...');
       return;
@@ -2546,7 +2562,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         final uri = sources[index];
         try {
           final request = await client.getUrl(uri);
-          request.headers.set('User-Agent', 'AgentPad-Android');
+          request.headers.set('User-Agent', 'AgentsPads-Android');
           request.headers.set('Accept', 'application/json');
           final response = await request.close().timeout(
             const Duration(seconds: 12),
@@ -2997,6 +3013,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       builder: (ctx) {
         return StatefulBuilder(
           builder: (ctx, setSheet) {
+            _refreshConnectedSheet = () {
+              if (ctx.mounted) setSheet(() {});
+            };
             return Padding(
               padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
               child: SizedBox(
@@ -3010,16 +3029,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                         IconButton(
                           tooltip: '刷新连接',
                           onPressed: () {
-                            hub?.dispose();
-                            hub = Hub(
-                              store,
-                              active: _connectionsActive,
-                              onChange: () {
-                                if (mounted) setState(() {});
-                                setSheet(() {});
-                              },
-                            );
-                            hub!.sync();
+                            hub?.restart();
                             setSheet(() {});
                           },
                           icon: const Icon(Icons.refresh),
@@ -3037,7 +3047,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             if (q == null) {
                               if (ctx.mounted) {
                                 ScaffoldMessenger.of(ctx).showSnackBar(
-                                  const SnackBar(content: Text('无法识别配对码')),
+                                  const SnackBar(content: Text('无法识别二维码，请确认电脑端已更新')),
                                 );
                               }
                               return;
@@ -3052,6 +3062,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                 ips: [q.ip],
                                 port: q.port,
                                 os: q.os,
+                                secret: q.secret,
                               ),
                             );
                             await _persist();
@@ -3118,7 +3129,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                               ),
                               subtitle: Text(
                                 '${d.ips.join(", ")}:${d.port}'
-                                '${hub?.isOnline(d) == true ? " · 在线" : ""}',
+                                '${hub?.isOnline(d) == true ? " · 在线" : ""}'
+                                '${d.needsPairing ? " · 被拒绝，请重新扫码或输入配对码" : !d.canAuthenticate ? " · 未配对，请扫码或输入配对码" : ""}',
                               ),
                               onLongPress: () async {
                                 await _confirmDelete(d);
@@ -3143,11 +3155,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         );
       },
     );
+    _refreshConnectedSheet = null;
   }
 
   Future<void> _manualAdd() async {
     final name = TextEditingController();
     final ip = TextEditingController();
+    final code = TextEditingController();
     final ok = await showDialog<bool>(
       context: context,
       builder: (c) => AlertDialog(
@@ -3162,6 +3176,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             TextField(
               controller: ip,
               decoration: const InputDecoration(labelText: 'IP 或 IP:端口'),
+            ),
+            TextField(
+              key: const ValueKey('manual-pair-code'),
+              controller: code,
+              keyboardType: TextInputType.number,
+              maxLength: 4,
+              decoration: const InputDecoration(
+                labelText: '配对码',
+                helperText: '电脑配对窗口显示的 4 位数字',
+              ),
             ),
           ],
         ),
@@ -3180,6 +3204,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (ok != true) return;
     final hp = parseHostPort(ip.text);
     if (hp.host.isEmpty) return;
+    final pairCode = code.text.trim();
+    if (!isPairCode(pairCode)) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('请输入电脑配对窗口显示的 4 位配对码')),
+        );
+      }
+      return;
+    }
     store.devices = upsertDevice(
       store.devices,
       Device(
@@ -3187,6 +3220,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         name: name.text.trim().isEmpty ? hp.host : name.text.trim(),
         ips: [hp.host],
         port: hp.port,
+        pairCode: pairCode,
       ),
     );
     await _persist();
@@ -3195,6 +3229,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _editDevice(Device d) async {
     final name = TextEditingController(text: d.name);
     final port = TextEditingController(text: '${d.port}');
+    final code = TextEditingController();
     final ipCtrls = [
       for (final ip in (d.ips.isEmpty ? [''] : d.ips))
         TextEditingController(text: ip),
@@ -3252,7 +3287,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             onPressed: ipCtrls.length <= 1
                                 ? null
                                 : () => setD(() {
-                                    ipCtrls.removeAt(i).dispose();
+                                    ipCtrls.removeAt(i);
                                   }),
                             icon: const Icon(Icons.remove_circle_outline),
                           ),
@@ -3267,6 +3302,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       }),
                       icon: const Icon(Icons.add, size: 18),
                       label: const Text('添加 IP'),
+                    ),
+                  ),
+                  TextField(
+                    key: const ValueKey('edit-pair-code'),
+                    controller: code,
+                    keyboardType: TextInputType.number,
+                    maxLength: 4,
+                    decoration: const InputDecoration(
+                      labelText: '配对码（重新配对时填写）',
+                      helperText: '电脑配对窗口显示的 4 位数字；留空则保持现有配对',
                     ),
                   ),
                 ],
@@ -3292,12 +3337,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       for (final c in ipCtrls)
         if (c.text.trim().isNotEmpty) c.text.trim(),
     ];
-    for (final c in ipCtrls) {
-      c.dispose();
-    }
-    name.dispose();
-    port.dispose();
+    final nextCode = code.text.trim();
     if (ok != true || nextIps.isEmpty) return;
+    if (isPairCode(nextCode)) {
+      d.pairCode = nextCode;
+      d.needsPairing = false;
+    }
     d.name = nextName.isEmpty ? d.name : nextName;
     d.ips = nextIps;
     d.port = nextPort > 0 ? nextPort : d.port;
@@ -3498,8 +3543,35 @@ class ScanPage extends StatefulWidget {
 }
 
 class _ScanPageState extends State<ScanPage> {
-  final controller = MobileScannerController();
+  final controller = MobileScannerController(formats: [BarcodeFormat.qrCode]);
   var done = false;
+  var zoomRange = (min: 1.0, max: 1.0);
+  var zoom = 1.0;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadZoomRange());
+  }
+
+  Future<void> _loadZoomRange() async {
+    try {
+      final r = await const MethodChannel(
+        'agentpad/ws',
+      ).invokeListMethod<double>('cameraZoomRange');
+      if (!mounted || r == null || r.length != 2) return;
+      setState(() => zoomRange = (min: r[0], max: r[1]));
+    } catch (_) {}
+  }
+
+  Future<void> _setZoom(double ratio) async {
+    setState(() => zoom = ratio);
+    try {
+      await controller.setZoomScale(
+        linearZoomFor(ratio, zoomRange.min, zoomRange.max),
+      );
+    } catch (_) {}
+  }
 
   @override
   void dispose() {
@@ -3520,33 +3592,123 @@ class _ScanPageState extends State<ScanPage> {
 
   @override
   Widget build(BuildContext context) {
+    final presets = zoomPresets(zoomRange.min, zoomRange.max);
     return Scaffold(
       appBar: AppBar(title: const Text('扫码')),
-      body: MobileScanner(
-        controller: controller,
-        onDetect: _onDetect,
-        errorBuilder: (context, error) {
-          return Center(
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Text('无法打开相机：${error.errorCode.name}\n请在系统设置里允许相机权限'),
-            ),
-          );
-        },
-        overlayBuilder: (context, constraints) {
-          return const IgnorePointer(
-            child: Center(
-              child: Text(
-                '对准电脑上的配对码',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 16,
-                  shadows: [Shadow(blurRadius: 8, color: Colors.black)],
+      body: Stack(
+        children: [
+          MobileScanner(
+            controller: controller,
+            onDetect: _onDetect,
+            errorBuilder: (context, error) {
+              return Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Text(
+                    '无法打开相机：${error.errorCode.name}\n请在系统设置里允许相机权限',
+                  ),
+                ),
+              );
+            },
+            overlayBuilder: (context, constraints) {
+              return const IgnorePointer(
+                child: Center(
+                  child: Text(
+                    '对准电脑上的二维码',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      shadows: [Shadow(blurRadius: 8, color: Colors.black)],
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+          if (presets.length > 1)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 32,
+              child: Center(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: Colors.black45,
+                    borderRadius: BorderRadius.circular(24),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(4),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        for (final r in presets)
+                          _ZoomChip(
+                            label: zoomLabel(r),
+                            selected: (zoom - r).abs() < 0.01,
+                            onTap: () => _setZoom(r),
+                          ),
+                      ],
+                    ),
+                  ),
                 ),
               ),
             ),
-          );
-        },
+        ],
+      ),
+    );
+  }
+}
+
+/// CameraX linear zoom is linear in crop width between the min and max ratio.
+double linearZoomFor(double ratio, double min, double max) {
+  if (max <= min) return 0;
+  return ((1 / min - 1 / ratio) / (1 / min - 1 / max)).clamp(0.0, 1.0);
+}
+
+List<double> zoomPresets(double min, double max) => [
+  if (min < 0.95) min,
+  for (final r in const [1.0, 2.0, 3.0, 5.0, 10.0])
+    if (r >= min && r <= max) r,
+];
+
+String zoomLabel(double r) =>
+    r < 1 ? '${r.toStringAsFixed(1)}x' : '${r.round()}x';
+
+class _ZoomChip extends StatelessWidget {
+  const _ZoomChip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      child: Material(
+        color: selected ? Colors.white : Colors.transparent,
+        shape: const CircleBorder(),
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: onTap,
+          child: SizedBox.square(
+            dimension: 40,
+            child: Center(
+              child: Text(
+                label,
+                style: TextStyle(
+                  color: selected ? Colors.black : Colors.white,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }

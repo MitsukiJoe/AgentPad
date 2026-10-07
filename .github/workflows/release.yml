@@ -34,22 +34,10 @@ jobs:
         id: version
         shell: bash
         run: |
-          baseline="0.1.0"
-          latest="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1)"
-          if [ -z "$latest" ]; then
-            version="$baseline"
-          else
-            current="${latest#v}"
-            IFS='.' read -r major minor patch <<< "$current"
-            if (( major == 0 && minor < 1 )); then
-              version="$baseline"
-            else
-              version="$major.$minor.$((patch + 1))"
-            fi
-          fi
+          version="$(git tag --list | bash .github/scripts/next-version.sh)"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
-          echo "Preparing AgentPad v$version"
+          echo "Preparing AgentsPads v$version"
 
   build-windows:
     name: Build Windows (x64)
@@ -73,7 +61,7 @@ jobs:
         shell: pwsh
         run: |
           cargo build --manifest-path desktop/Cargo.toml -p agentpad --release --target x86_64-pc-windows-msvc
-          Copy-Item desktop\target\x86_64-pc-windows-msvc\release\agentpad.exe agentpad-windows-x64.exe
+          Copy-Item desktop\target\x86_64-pc-windows-msvc\release\agentpad.exe agentspads-windows-x64.exe
 
       - name: Sign Windows executable
         shell: pwsh
@@ -98,9 +86,9 @@ jobs:
               throw "signtool.exe was not found"
             }
             $signtoolPath = $signtool.FullName
-            & $signtoolPath sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f $certificatePath /p $env:WINDOWS_CERTIFICATE_PASSWORD agentpad-windows-x64.exe
+            & $signtoolPath sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f $certificatePath /p $env:WINDOWS_CERTIFICATE_PASSWORD agentspads-windows-x64.exe
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            & $signtoolPath verify /pa /v agentpad-windows-x64.exe
+            & $signtoolPath verify /pa /v agentspads-windows-x64.exe
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } finally {
             Remove-Item -LiteralPath $certificatePath -Force -ErrorAction SilentlyContinue
@@ -110,7 +98,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: windows-artifact
-          path: agentpad-windows-x64.exe
+          path: agentspads-windows-x64.exe
           if-no-files-found: error
 
   build-macos:
@@ -135,7 +123,7 @@ jobs:
         shell: bash
         run: |
           cargo build --manifest-path desktop/Cargo.toml -p agentpad --release --target aarch64-apple-darwin
-          app="desktop/target/aarch64-apple-darwin/release/AgentPad.app"
+          app="desktop/target/aarch64-apple-darwin/release/AgentsPads.app"
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
           cp desktop/macos/Info.plist "$app/Contents/Info.plist"
           cp desktop/macos/AgentPad.icns "$app/Contents/Resources/AgentPad.icns"
@@ -182,23 +170,23 @@ jobs:
           SIGNING_IDENTITY: ${{ steps.signing.outputs.identity }}
           DEVELOPER_ID: ${{ steps.signing.outputs.developer_id }}
         run: |
-          app="desktop/target/aarch64-apple-darwin/release/AgentPad.app"
+          app="desktop/target/aarch64-apple-darwin/release/AgentsPads.app"
           if [ -n "$SIGNING_IDENTITY" ]; then
             if [ "$DEVELOPER_ID" = "true" ]; then
               codesign --force --deep --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$app"
             else
               echo "Using stable self-signed identity for Accessibility continuity"
-              codesign --force --deep --sign "$SIGNING_IDENTITY" --identifier app.agentpad "$app"
+              codesign --force --deep --sign "$SIGNING_IDENTITY" --identifier app.agentspads "$app"
             fi
           else
             echo "macOS signing secret not configured; using ad-hoc signature"
-            codesign --force --deep --sign - --identifier app.agentpad "$app"
+            codesign --force --deep --sign - --identifier app.agentspads "$app"
           fi
           codesign --verify --deep --strict --verbose=2 "$app"
-          ditto -c -k --sequesterRsrc --keepParent "$app" agentpad-macos-arm64.zip
-          hdiutil create -volname "AgentPad" -srcfolder "$app" -ov -format UDZO agentpad-macos-arm64.dmg
+          ditto -c -k --sequesterRsrc --keepParent "$app" agentspads-macos-arm64.zip
+          hdiutil create -volname "AgentsPads" -srcfolder "$app" -ov -format UDZO agentspads-macos-arm64.dmg
           if [ "$DEVELOPER_ID" = "true" ]; then
-            codesign --force --timestamp --sign "$SIGNING_IDENTITY" agentpad-macos-arm64.dmg
+            codesign --force --timestamp --sign "$SIGNING_IDENTITY" agentspads-macos-arm64.dmg
           fi
 
       - name: Notarize and package macOS artifacts
@@ -214,29 +202,29 @@ jobs:
             echo "Apple notarization secrets not configured; skipping notarization"
             exit 0
           fi
-          app="desktop/target/aarch64-apple-darwin/release/AgentPad.app"
+          app="desktop/target/aarch64-apple-darwin/release/AgentsPads.app"
           key_path="$RUNNER_TEMP/AuthKey_$APPLE_API_KEY_ID.p8"
           trap 'rm -f "$key_path"' EXIT
           umask 077
           printf '%s' "$APPLE_API_PRIVATE_KEY_BASE64" | openssl base64 -d -A -out "$key_path"
-          xcrun notarytool submit agentpad-macos-arm64.zip \
+          xcrun notarytool submit agentspads-macos-arm64.zip \
             --key "$key_path" \
             --key-id "$APPLE_API_KEY_ID" \
             --issuer "$APPLE_API_ISSUER_ID" \
             --wait
           xcrun stapler staple "$app"
-          rm agentpad-macos-arm64.zip
-          ditto -c -k --sequesterRsrc --keepParent "$app" agentpad-macos-arm64.zip
-          hdiutil create -volname "AgentPad" -srcfolder "$app" -ov -format UDZO agentpad-macos-arm64.dmg
-          codesign --force --timestamp --sign "$SIGNING_IDENTITY" agentpad-macos-arm64.dmg
-          xcrun notarytool submit agentpad-macos-arm64.dmg \
+          rm agentspads-macos-arm64.zip
+          ditto -c -k --sequesterRsrc --keepParent "$app" agentspads-macos-arm64.zip
+          hdiutil create -volname "AgentsPads" -srcfolder "$app" -ov -format UDZO agentspads-macos-arm64.dmg
+          codesign --force --timestamp --sign "$SIGNING_IDENTITY" agentspads-macos-arm64.dmg
+          xcrun notarytool submit agentspads-macos-arm64.dmg \
             --key "$key_path" \
             --key-id "$APPLE_API_KEY_ID" \
             --issuer "$APPLE_API_ISSUER_ID" \
             --wait
-          xcrun stapler staple agentpad-macos-arm64.dmg
+          xcrun stapler staple agentspads-macos-arm64.dmg
           xcrun stapler validate "$app"
-          xcrun stapler validate agentpad-macos-arm64.dmg
+          xcrun stapler validate agentspads-macos-arm64.dmg
 
       - name: Remove macOS signing keychain
         if: ${{ always() }}
@@ -252,8 +240,8 @@ jobs:
         with:
           name: macos-artifact
           path: |
-            agentpad-macos-arm64.dmg
-            agentpad-macos-arm64.zip
+            agentspads-macos-arm64.dmg
+            agentspads-macos-arm64.zip
           if-no-files-found: error
 
   build-android:
@@ -312,7 +300,7 @@ jobs:
             --build-name="$AGENTPAD_VERSION" \
             --build-number="$GITHUB_RUN_NUMBER" \
             --dart-define=AGENTPAD_VERSION="$AGENTPAD_VERSION"
-          cp build/app/outputs/flutter-apk/app-release.apk ../agentpad.apk
+          cp build/app/outputs/flutter-apk/app-release.apk ../agentspads.apk
 
       - name: Remove Android signing files
         if: ${{ always() }}
@@ -323,7 +311,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: android-artifact
-          path: agentpad.apk
+          path: agentspads.apk
           if-no-files-found: error
 
   create-release:
@@ -350,11 +338,11 @@ jobs:
       - name: Verify release artifacts
         shell: bash
         run: |
-          test -s agentpad-windows-x64.exe
-          test -s agentpad-macos-arm64.dmg
-          test -s agentpad-macos-arm64.zip
-          test -s agentpad.apk
-          sha256sum agentpad-windows-x64.exe agentpad-macos-arm64.dmg agentpad-macos-arm64.zip agentpad.apk
+          test -s agentspads-windows-x64.exe
+          test -s agentspads-macos-arm64.dmg
+          test -s agentspads-macos-arm64.zip
+          test -s agentspads.apk
+          sha256sum agentspads-windows-x64.exe agentspads-macos-arm64.dmg agentspads-macos-arm64.zip agentspads.apk
 
       - name: Create update manifest
         shell: bash
@@ -368,18 +356,20 @@ jobs:
             -f target_commitish="$GITHUB_SHA" \
             --jq .body > release-notes.md
           base_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG"
-          windows_sha="$(sha256sum agentpad-windows-x64.exe | awk '{print $1}')"
-          macos_sha="$(sha256sum agentpad-macos-arm64.zip | awk '{print $1}')"
-          android_sha="$(sha256sum agentpad.apk | awk '{print $1}')"
+          windows_sha="$(sha256sum agentspads-windows-x64.exe | awk '{print $1}')"
+          macos_sha="$(sha256sum agentspads-macos-arm64.zip | awk '{print $1}')"
+          android_sha="$(sha256sum agentspads.apk | awk '{print $1}')"
+          BASE_URL="$base_url" python3 -c 'import os; from pathlib import Path; base=os.environ["BASE_URL"]; badge=lambda alt, url, src: f"<a href=\"{url}\"><img alt=\"{alt}\" src=\"{src}\"></a>"; rows=("Windows", badge("Windows EXE x64", f"{base}/agentspads-windows-x64.exe", "https://img.shields.io/badge/EXE-x64-2d7d9a.svg?logo=windows&logoColor=white"), "macOS", badge("macOS DMG Apple Silicon", f"{base}/agentspads-macos-arm64.dmg", "https://img.shields.io/badge/DMG-Apple%20Silicon-000000.svg?logo=apple&logoColor=white"), "Android", badge("Android APK", f"{base}/agentspads.apk", "https://img.shields.io/badge/APK-Android-168039.svg?logo=android&logoColor=white")); body=["<a href=\"https://qm.qq.com/q/oL9E21pt7k\"><img alt=\"QQ群\" src=\"https://img.shields.io/badge/QQ%E7%BE%A4-%E7%82%B9%E6%AD%A4%E5%8A%A0%E5%85%A5-2da44e.svg?logo=qq&logoColor=white\"></a> <a href=\"https://t.me/Neko0CM\"><img alt=\"TG群\" src=\"https://img.shields.io/badge/TG%E7%BE%A4-%E7%82%B9%E6%AD%A4%E5%8A%A0%E5%85%A5-26A5E4.svg?logo=telegram&logoColor=white\"></a>", "", "**按系统下载：**", "", "<div align=\"left\">", "<table>", "<thead align=\"left\"><tr><th>系统</th><th>下载</th></tr></thead>", "<tbody align=\"left\">"];
+          [body.append(f"<tr><td>{rows[i]}</td><td>{rows[i+1]}</td></tr>") for i in range(0, len(rows), 2)]; body += ["</tbody>", "</table>", "</div>", ""]; Path("release-body.md").write_text("\n".join(body) + Path("release-notes.md").read_text())'
           jq -n \
             --arg tag_name "$RELEASE_TAG" \
             --arg version "$RELEASE_VERSION" \
             --arg release_url "https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG" \
-            --arg windows_url "$base_url/agentpad-windows-x64.exe" \
+            --arg windows_url "$base_url/agentspads-windows-x64.exe" \
             --arg windows_sha "$windows_sha" \
-            --arg macos_url "$base_url/agentpad-macos-arm64.zip" \
+            --arg macos_url "$base_url/agentspads-macos-arm64.zip" \
             --arg macos_sha "$macos_sha" \
-            --arg android_url "$base_url/agentpad.apk" \
+            --arg android_url "$base_url/agentspads.apk" \
             --arg android_sha "$android_sha" \
             --rawfile body release-notes.md \
             '{
@@ -389,27 +379,27 @@ jobs:
               release_url: $release_url,
               body: $body,
               assets: {
-                windows: {name: "agentpad-windows-x64.exe", url: $windows_url, sha256: $windows_sha},
-                macos: {name: "agentpad-macos-arm64.zip", url: $macos_url, sha256: $macos_sha},
-                android: {name: "agentpad.apk", url: $android_url, sha256: $android_sha}
+                windows: {name: "agentspads-windows-x64.exe", url: $windows_url, sha256: $windows_sha},
+                macos: {name: "agentspads-macos-arm64.zip", url: $macos_url, sha256: $macos_sha},
+                android: {name: "agentspads.apk", url: $android_url, sha256: $android_sha}
               }
-            }' > agentpad-update.json
-          jq -e '.schema == 1 and (.version | length > 0) and (.assets.windows.sha256 | length == 64) and (.assets.macos.sha256 | length == 64) and (.assets.android.sha256 | length == 64)' agentpad-update.json >/dev/null
+            }' > agentspads-update.json
+          jq -e '.schema == 1 and (.version | length > 0) and (.assets.windows.sha256 | length == 64) and (.assets.macos.sha256 | length == 64) and (.assets.android.sha256 | length == 64)' agentspads-update.json >/dev/null
 
       - name: Create tag and GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare-version.outputs.tag }}
-          name: AgentPad ${{ needs.prepare-version.outputs.tag }}
+          name: AgentsPads ${{ needs.prepare-version.outputs.tag }}
           target_commitish: ${{ github.sha }}
-          body_path: release-notes.md
+          body_path: release-body.md
           fail_on_unmatched_files: true
           files: |
-            agentpad-windows-x64.exe
-            agentpad-macos-arm64.dmg
-            agentpad-macos-arm64.zip
-            agentpad.apk
-            agentpad-update.json
+            agentspads-windows-x64.exe
+            agentspads-macos-arm64.dmg
+            agentspads-macos-arm64.zip
+            agentspads.apk
+            agentspads-update.json
 
       - name: Publish update manifest branch
         continue-on-error: true
@@ -421,7 +411,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout --orphan update-manifest-publish
           git rm -rf .
-          git add -f agentpad-update.json
+          git add -f agentspads-update.json
           git commit -m "chore: publish update manifest for $RELEASE_TAG"
           git push --force origin HEAD:update-manifest
 
@@ -432,7 +422,7 @@ jobs:
           RELEASE_TAG: ${{ needs.prepare-version.outputs.tag }}
           RELEASE_VERSION: ${{ needs.prepare-version.outputs.version }}
         run: |
-          path="gh/$GITHUB_REPOSITORY@update-manifest/agentpad-update.json"
+          path="gh/$GITHUB_REPOSITORY@update-manifest/agentspads-update.json"
           curl --fail --silent --show-error --retry 2 "https://purge.jsdelivr.net/$path" >/dev/null
           curl --fail --silent --show-error --retry 2 \
             "https://cdn.jsdmirror.com/$path?release=$RELEASE_TAG" \

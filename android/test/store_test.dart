@@ -101,6 +101,59 @@ void main() {
     expect(Device.fromJson(json).os, 'windows');
   });
 
+  test('scan secret clears a stale pair code on the same ip', () {
+    var list = upsertDevice(
+      [],
+      Device(
+        deviceId: '',
+        name: 'manual',
+        ips: ['10.0.0.8'],
+        port: 9618,
+        pairCode: '0420',
+      ),
+    );
+    list = upsertDevice(
+      list,
+      Device(
+        deviceId: '',
+        name: 'scan',
+        ips: ['10.0.0.8'],
+        port: 9618,
+        secret: 'new-secret',
+        pairCode: '',
+      ),
+    );
+    expect(list.length, 1);
+    expect(list.single.pairCode, isEmpty);
+    expect(list.single.secret, 'new-secret');
+  });
+
+  test('upsert collapses rows that already share a device id', () {
+    final list = upsertDevice(
+      [
+        Device(
+          deviceId: 'a',
+          name: 'A',
+          ips: ['1.1.1.1'],
+          port: 9618,
+          secret: 's',
+        ),
+        Device(deviceId: 'a', name: 'A2', ips: ['2.2.2.2'], port: 9618),
+      ],
+      Device(
+        deviceId: 'a',
+        name: 'A',
+        ips: ['1.1.1.1'],
+        port: 9618,
+        secret: 's',
+      ),
+    );
+    expect(list, hasLength(1));
+    expect(list.single.deviceId, 'a');
+    expect(list.single.name, 'A');
+    expect(list.single.ips, ['1.1.1.1', '2.2.2.2']);
+  });
+
   test('collect all ips setting defaults off and persists', () async {
     SharedPreferences.setMockInitialValues({});
     final s = PadStore();

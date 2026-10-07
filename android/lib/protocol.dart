@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:crypto/crypto.dart';
+
 const int kPort = 9618;
 
 class QrPayload {
@@ -9,6 +11,7 @@ class QrPayload {
     required this.port,
     required this.name,
     required this.os,
+    required this.secret,
     required this.ips,
   });
 
@@ -17,6 +20,7 @@ class QrPayload {
   final int port;
   final String name;
   final String os;
+  final String secret;
   final List<String> ips;
 
   static QrPayload? parse(String raw) {
@@ -30,7 +34,8 @@ class QrPayload {
     final map = decoded.cast<String, dynamic>();
     if (!_isV1(map['v']) || map['type']?.toString() != 'agentpad') return null;
     final ip = map['ip'] as String? ?? '';
-    if (ip.isEmpty) return null;
+    final secret = map['secret'] as String? ?? '';
+    if (ip.isEmpty || secret.isEmpty) return null;
     final ips = <String>[
       if (map['ips'] is List)
         for (final e in map['ips'] as List) e.toString(),
@@ -43,6 +48,7 @@ class QrPayload {
       port: (map['port'] as num?)?.toInt() ?? kPort,
       name: map['name'] as String? ?? ip,
       os: map['os'] as String? ?? '',
+      secret: secret,
       ips: ips,
     );
   }
@@ -74,11 +80,25 @@ String undoMsg() => jsonEncode({'type': 'undo'});
 
 String pingMsg() => jsonEncode({'type': 'ping'});
 
-String helloMsg(String clientId, String clientName) => jsonEncode({
+/// HMAC-SHA256(key = secret, message = nonce)，小写十六进制。
+String authTag(String secret, String nonce) =>
+    Hmac(sha256, utf8.encode(secret)).convert(utf8.encode(nonce)).toString();
+
+String helloMsg(String clientId, String clientName, String auth) => jsonEncode({
   'type': 'hello',
   'client_id': clientId,
   'client_name': clientName,
+  'auth': auth,
 });
+
+String pairMsg(String clientId, String clientName, String code) => jsonEncode({
+  'type': 'pair',
+  'client_id': clientId,
+  'client_name': clientName,
+  'code': code,
+});
+
+bool isPairCode(String code) => RegExp(r'^[0-9]{4}$').hasMatch(code);
 
 HostPort parseHostPort(String raw) {
   final s = raw.trim();

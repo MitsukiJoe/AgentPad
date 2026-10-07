@@ -78,11 +78,13 @@ fn looks_like_tunnel(metadata: &str) -> bool {
 }
 
 fn looks_like_wifi(metadata: &str) -> bool {
-    metadata.contains("wlan")
-        || metadata.contains("wifi")
-        || metadata.contains("wi-fi")
-        || metadata.contains("airport")
-        || metadata.split_whitespace().next() == Some("en0")
+    ["wlan", "wi-fi", "wifi", "wireless", "airport", "802.11"]
+        .iter()
+        .any(|needle| metadata.contains(needle))
+}
+
+fn looks_like_ethernet(metadata: &str) -> bool {
+    metadata.contains("ethernet") || metadata.contains("以太网") || metadata.contains("gbe")
 }
 
 fn classify(if_type: InterfaceType, metadata: &str) -> NicKind {
@@ -115,6 +117,9 @@ fn classify(if_type: InterfaceType, metadata: &str) -> NicKind {
         InterfaceType::Bridge | InterfaceType::PeerToPeerWireless
     ) {
         return NicKind::Virtual;
+    }
+    if looks_like_ethernet(metadata) {
+        return NicKind::Ethernet;
     }
     NicKind::Other
 }
@@ -208,6 +213,40 @@ mod tests {
             classify(InterfaceType::Bridge, "bridge100"),
             NicKind::Virtual
         );
+    }
+
+    #[test]
+    fn classifies_wifi_and_ethernet_from_names_not_bsd_index() {
+        assert_eq!(
+            classify(InterfaceType::Ethernet, "en0 ethernet"),
+            NicKind::Ethernet
+        );
+        assert_eq!(
+            classify(InterfaceType::Unknown, "en0 ethernet"),
+            NicKind::Ethernet
+        );
+        assert_eq!(
+            classify(InterfaceType::Wireless80211, "en1 wi-fi"),
+            NicKind::Wifi
+        );
+        assert_eq!(classify(InterfaceType::Unknown, "en1 wi-fi"), NicKind::Wifi);
+        assert_eq!(classify(InterfaceType::Ethernet, "en0"), NicKind::Ethernet);
+        assert_eq!(
+            classify(
+                InterfaceType::Unknown,
+                &"{guid} WLAN Intel(R) Wi-Fi 6 AX201".to_ascii_lowercase()
+            ),
+            NicKind::Wifi
+        );
+        assert_eq!(
+            classify(
+                InterfaceType::Unknown,
+                &"{guid} 以太网 Realtek PCIe GbE Family Controller".to_ascii_lowercase()
+            ),
+            NicKind::Ethernet
+        );
+        assert_eq!(classify(InterfaceType::Unknown, "802.11"), NicKind::Wifi);
+        assert_eq!(classify(InterfaceType::Unknown, "wireless"), NicKind::Wifi);
     }
 
     #[test]

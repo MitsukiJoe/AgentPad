@@ -10,11 +10,27 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-pub const CURRENT_VERSION: &str = match option_env!("AGENTPAD_VERSION") {
-    Some(version) => version,
-    None => env!("CARGO_PKG_VERSION"),
+pub const CURRENT_VERSION: &str = if cfg!(debug_assertions) {
+    "debug"
+} else {
+    match option_env!("AGENTPAD_VERSION") {
+        Some(version) => version,
+        None => env!("CARGO_PKG_VERSION"),
+    }
 };
-pub const GITHUB_REPO: &str = "MitsukiJoe/AgentPad";
+
+pub fn checks_enabled() -> bool {
+    parse_version(CURRENT_VERSION).is_some()
+}
+
+pub fn version_label() -> String {
+    if checks_enabled() {
+        format!("v{CURRENT_VERSION}")
+    } else {
+        CURRENT_VERSION.to_string()
+    }
+}
+pub const GITHUB_REPO: &str = "MitsukiJoe/AgentsPads";
 #[cfg(any(target_os = "windows", test))]
 const AFTER_UPDATE_FLAG: &str = "--after-update";
 #[cfg(target_os = "windows")]
@@ -83,7 +99,7 @@ impl Updater {
     }
 
     pub fn check_for_updates(&self) {
-        if self.checking.swap(true, Ordering::SeqCst) {
+        if !checks_enabled() || self.checking.swap(true, Ordering::SeqCst) {
             return;
         }
         let status_arc = Arc::clone(&self.status);
@@ -129,9 +145,9 @@ fn manifest_urls() -> [String; 3] {
         .unwrap_or_default()
         .as_secs()
         / 3600;
-    let path = format!("gh/{GITHUB_REPO}@update-manifest/agentpad-update.json");
+    let path = format!("gh/{GITHUB_REPO}@update-manifest/agentspads-update.json");
     [
-        format!("https://github.com/{GITHUB_REPO}/releases/latest/download/agentpad-update.json"),
+        format!("https://github.com/{GITHUB_REPO}/releases/latest/download/agentspads-update.json"),
         format!("https://cdn.jsdelivr.net/{path}?hour={cache_hour}"),
         format!("https://cdn.jsdmirror.com/{path}?hour={cache_hour}"),
     ]
@@ -140,7 +156,7 @@ fn manifest_urls() -> [String; 3] {
 fn fetch_manifest(agent: &ureq::Agent, url: &str) -> Result<UpdateManifest, String> {
     let response = agent
         .get(url)
-        .set("User-Agent", "AgentPad-Desktop")
+        .set("User-Agent", "AgentsPads-Desktop")
         .call()
         .map_err(|e| format!("{url}: {e}"))?;
     let mut json_text = String::new();
@@ -174,7 +190,7 @@ fn fetch_latest_release() -> Result<Option<UpdateInfo>, String> {
         };
         if manifest.schema != 1
             || manifest.tag_name != format!("v{}", manifest.version)
-            || manifest.version.is_empty()
+            || parse_version(&manifest.version).is_none()
         {
             errors.push(format!("更新清单字段无效 ({url})"));
             continue;
@@ -191,9 +207,9 @@ fn fetch_latest_release() -> Result<Option<UpdateInfo>, String> {
         #[cfg(target_os = "macos")]
         let asset = manifest.assets.macos;
         let expected_name = if cfg!(target_os = "windows") {
-            "agentpad-windows-x64.exe"
+            "agentspads-windows-x64.exe"
         } else {
-            "agentpad-macos-arm64.zip"
+            "agentspads-macos-arm64.zip"
         };
         let expected_url = expected_asset_url(&manifest.tag_name, expected_name);
         if asset.name != expected_name || asset.url != expected_url || !valid_sha256(&asset.sha256)
@@ -276,21 +292,19 @@ pub fn is_post_update_launch() -> bool {
     }
 }
 
+/// 只接受 `X.Y.Z` 纯 ASCII 数字；版本会拼进下载 URL，不能带任何路径字符。
+fn parse_version(v: &str) -> Option<[u64; 3]> {
+    let mut parts = v.split('.').map(|s| {
+        (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| s.parse().ok())
+            .flatten()
+    });
+    let out = [parts.next()??, parts.next()??, parts.next()??];
+    parts.next().is_none().then_some(out)
+}
+
 fn is_newer_version(remote: &str, current: &str) -> bool {
-    let parse = |v: &str| -> Vec<u64> {
-        v.split('.')
-            .filter_map(|s| {
-                s.chars()
-                    .take_while(|c| c.is_ascii_digit())
-                    .collect::<String>()
-                    .parse()
-                    .ok()
-            })
-            .collect()
-    };
-    let r = parse(remote);
-    let c = parse(current);
-    r > c
+    matches!((parse_version(remote), parse_version(current)), (Some(r), Some(c)) if r > c)
 }
 
 fn https_agent(timeout: Duration) -> Result<ureq::Agent, String> {
@@ -320,7 +334,7 @@ fn download_with_progress(
     let agent = https_agent(Duration::from_secs(600))?;
     let response = agent
         .get(url)
-        .set("User-Agent", "AgentPad-Desktop")
+        .set("User-Agent", "AgentsPads-Desktop")
         .call()
         .map_err(|e| format!("下载失败: {e}"))?;
     let total = response
@@ -412,9 +426,12 @@ fn find_app_bundle(exe: &Path) -> Option<PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn perform_update(info: &UpdateInfo, status: &Arc<Mutex<UpdateStatus>>) -> Result<(), String> {
-    let tmp_dir = PathBuf::from("/tmp/agentpad_update");
-    let _ = std::fs::remove_dir_all(&tmp_dir);
-    std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("创建临时目录失败: {e}"))?;
+    // 每用户 $TMPDIR 下随机新建、0700；失败返回时随 drop 删除，exit 前需显式清理。
+    let tmp = tempfile::Builder::new()
+        .prefix("agentpad-update-")
+        .tempdir()
+        .map_err(|e| format!("创建临时目录失败: {e}"))?;
+    let tmp_dir = tmp.path().to_path_buf();
 
     let report = |done: u64, total: u64| {
         *status.lock().unwrap() = UpdateStatus::Updating(download_progress_msg(done, total));
@@ -434,15 +451,15 @@ fn perform_update(info: &UpdateInfo, status: &Arc<Mutex<UpdateStatus>>) -> Resul
     if !unzip_ok {
         return Err("解压更新包失败".into());
     }
-    let new_app = tmp_dir.join("AgentPad.app");
+    let new_app = tmp_dir.join("AgentsPads.app");
     if !new_app.exists() {
-        return Err("更新包内未找到 AgentPad.app".into());
+        return Err("更新包内未找到 AgentsPads.app".into());
     }
 
     let current_exe = std::env::current_exe().map_err(|e| format!("获取当前路径失败: {e}"))?;
     let Some(bundle) = find_app_bundle(&current_exe) else {
         // 非 .app 运行（如 cargo 开发构建）：打开解压目录手动处理
-        let _ = Command::new("open").arg(&tmp_dir).spawn();
+        let _ = Command::new("open").arg(tmp.keep()).spawn();
         std::process::exit(0);
     };
 
@@ -482,6 +499,7 @@ fn perform_update(info: &UpdateInfo, status: &Arc<Mutex<UpdateStatus>>) -> Resul
         .arg(&bundle)
         .spawn()
         .map_err(|e| format!("启动新版本失败: {e}"))?;
+    drop(tmp);
     std::process::exit(0);
 }
 
@@ -514,7 +532,6 @@ pub fn cleanup_stale_updater_script() {
                 }
             }
         }
-        let _ = std::fs::remove_dir_all("/tmp/agentpad_update");
     }
 }
 
@@ -533,6 +550,39 @@ mod tests {
         assert!(is_newer_version("0.1.1", "0.1.0"));
         assert!(!is_newer_version("0.1.0", "0.1.0"));
         assert!(!is_newer_version("0.0.9", "0.1.0"));
+        assert!(is_newer_version("0.1.10", "0.1.9"));
+    }
+
+    #[test]
+    fn debug_build_reports_debug_and_never_checks() {
+        assert_eq!(CURRENT_VERSION, "debug");
+        assert_eq!(version_label(), "debug");
+        let updater = Updater::new();
+        updater.check_for_updates();
+        assert!(!updater.checking.load(Ordering::SeqCst));
+        assert!(matches!(
+            *updater.status.lock().unwrap(),
+            UpdateStatus::Idle
+        ));
+    }
+
+    #[test]
+    fn rejects_versions_that_could_escape_release_path() {
+        for bad in [
+            "9.9.9/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/Evil/Repo/releases/download/v9.9.9",
+            "9.9.9/../../../../../Evil/Repo/releases/download/v9.9.9",
+            "9/",
+            "9.9",
+            "9.9.9.9",
+            "9.9.9-beta",
+            "9..9",
+            "+9.9.9",
+            "",
+        ] {
+            assert_eq!(parse_version(bad), None, "{bad}");
+            assert!(!is_newer_version(bad, "0.1.0"), "{bad}");
+        }
+        assert_eq!(parse_version("1.20.3"), Some([1, 20, 3]));
     }
 
     #[test]
@@ -545,9 +595,9 @@ mod tests {
               "release_url": "https://example.com/v1.2.3",
               "body": "notes",
               "assets": {
-                "windows": {"name":"agentpad-windows-x64.exe","url":"https://example.com/a.exe","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-                "macos": {"name":"agentpad-macos-arm64.zip","url":"https://example.com/a.zip","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
-                "android": {"name":"agentpad.apk","url":"https://example.com/a.apk","sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+                "windows": {"name":"agentspads-windows-x64.exe","url":"https://example.com/a.exe","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                "macos": {"name":"agentspads-macos-arm64.zip","url":"https://example.com/a.zip","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+                "android": {"name":"agentspads.apk","url":"https://example.com/a.apk","sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
               }
             }"#,
         )
@@ -563,8 +613,8 @@ mod tests {
         assert!(urls[1].contains("cdn.jsdelivr.net"));
         assert!(urls[2].contains("cdn.jsdmirror.com"));
         assert_eq!(
-            expected_asset_url("v1.2.3", "agentpad-macos-arm64.zip"),
-            "https://github.com/MitsukiJoe/AgentPad/releases/download/v1.2.3/agentpad-macos-arm64.zip"
+            expected_asset_url("v1.2.3", "agentspads-macos-arm64.zip"),
+            "https://github.com/MitsukiJoe/AgentsPads/releases/download/v1.2.3/agentspads-macos-arm64.zip"
         );
     }
 
