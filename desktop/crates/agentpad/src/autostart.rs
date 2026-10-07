@@ -2,20 +2,42 @@ use std::path::{Path, PathBuf};
 
 const PREFERENCE_FILE: &str = "autostart.txt";
 
+/// 同步用户 Startup 项。提权进程不碰用户目录，直接返回。
+/// 管理员模式下开机启动由计划任务的登录触发负责，Startup 里的旧项要撤掉，免得重复启动。
 pub fn apply() {
-    if !available() {
+    if !available() || this_process_elevated() {
         return;
     }
-    if sync_system(enabled()).is_err() {
+    let want = !admin_mode() && read_preference(&preference_path());
+    if sync_system(want).is_err() {
         crate::logutil::write("autostart apply failed");
     }
 }
 
 pub fn enabled() -> bool {
-    read_preference(&crate::identity::data_dir().join(PREFERENCE_FILE))
+    #[cfg(windows)]
+    if admin_mode() {
+        return crate::elevation::autostart_enabled();
+    }
+    read_preference(&preference_path())
 }
 
 pub fn set_enabled(enabled: bool) -> std::io::Result<()> {
+    #[cfg(windows)]
+    if admin_mode() {
+        // 只有提权实例能改计划任务；它不碰用户目录。
+        return if crate::elevation::set_autostart(enabled) {
+            Ok(())
+        } else {
+            Err(std::io::Error::other("admin autostart task update failed"))
+        };
+    }
+    if this_process_elevated() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "autostart is unchanged while elevated",
+        ));
+    }
     if !available() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
@@ -23,11 +45,35 @@ pub fn set_enabled(enabled: bool) -> std::io::Result<()> {
         ));
     }
     sync_system(enabled)?;
-    let path = crate::identity::data_dir().join(PREFERENCE_FILE);
+    let path = preference_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(path, enabled.to_string())
+}
+
+fn this_process_elevated() -> bool {
+    crate::elevation::is_elevated()
+}
+
+#[cfg(windows)]
+fn admin_mode() -> bool {
+    crate::elevation::enabled()
+}
+
+#[cfg(not(windows))]
+fn admin_mode() -> bool {
+    false
+}
+
+/// 偏好留在普通用户目录。提权进程只读这个布尔值，写入被 `edits_allowed` 拒绝。
+fn preference_path() -> PathBuf {
+    let dir = if this_process_elevated() {
+        crate::identity::fixed_user_data_dir()
+    } else {
+        crate::identity::data_dir()
+    };
+    dir.join(PREFERENCE_FILE)
 }
 
 pub fn available() -> bool {
@@ -35,6 +81,12 @@ pub fn available() -> bool {
 }
 
 fn read_preference(path: &Path) -> bool {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > 8 {
+        return false;
+    }
     std::fs::read_to_string(path).is_ok_and(|value| value.trim() == "true")
 }
 
@@ -55,8 +107,6 @@ fn sync_entry(path: &Path, contents: &str, enabled: bool) -> std::io::Result<()>
 
 fn sync_system(enabled: bool) -> std::io::Result<()> {
     let exe = std::env::current_exe()?;
-    #[cfg(windows)]
-    let exe = crate::elevation::launcher_for_autostart(exe);
     #[cfg(target_os = "macos")]
     {
         let app = app_bundle_for_exe(&exe).ok_or_else(|| {
@@ -76,8 +126,7 @@ fn sync_system(enabled: bool) -> std::io::Result<()> {
         })?;
         let path = PathBuf::from(appdata)
             .join("Microsoft/Windows/Start Menu/Programs/Startup/AgentsPads.bat");
-        let bat = format!("@echo off\r\nstart \"\" \"{}\"\r\n", exe.display());
-        sync_entry(&path, &bat, enabled)
+        sync_entry(&path, &windows_startup_bat(&exe), enabled)
     }
 }
 
@@ -99,6 +148,12 @@ pub(crate) fn running_from_app_bundle() -> bool {
     {
         true
     }
+}
+
+/// 启动项只指向当前这个未提权进程自己的 exe，不再读用户目录里的启动器路径。
+#[cfg(any(windows, test))]
+fn windows_startup_bat(exe: &Path) -> String {
+    format!("@echo off\r\nstart \"\" \"{}\"\r\n", exe.display())
 }
 
 fn macos_plist(app: &Path) -> String {
@@ -174,5 +229,14 @@ mod tests {
         assert!(body.contains("<string>/usr/bin/open</string>"));
         assert!(body.contains("<string>-g</string>"));
         assert!(body.contains("<string>/Applications/AgentsPads.app</string>"));
+    }
+
+    #[test]
+    fn windows_startup_bat_points_at_the_current_executable_only() {
+        let bat = windows_startup_bat(Path::new(r"C:\Apps\AgentsPads\agentspads.exe"));
+        assert_eq!(
+            bat,
+            "@echo off\r\nstart \"\" \"C:\\Apps\\AgentsPads\\agentspads.exe\"\r\n"
+        );
     }
 }

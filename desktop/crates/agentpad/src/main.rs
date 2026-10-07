@@ -17,11 +17,18 @@ use std::net::SocketAddr;
 
 fn main() -> eframe::Result {
     elevation::exit_if_admin_maintenance();
+    // Windows：开机启动项由未提权进程在提权重启前同步；提权进程里 apply 什么也不做。
+    // macOS 没有提权分支，仍在下面原来的位置调用，相对更新检查的顺序不变。
+    if cfg!(windows) {
+        autostart::apply();
+    }
     if elevation::relaunch_if_needed() {
         return Ok(());
     }
     let post_update = updater::is_post_update_launch();
-    autostart::apply();
+    if !cfg!(windows) {
+        autostart::apply();
+    }
     updater::cleanup_stale_updater_script();
     let identity = match identity::load() {
         Ok(identity) => identity,

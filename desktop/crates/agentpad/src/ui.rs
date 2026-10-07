@@ -1546,18 +1546,20 @@ impl PairingApp {
     #[cfg(windows)]
     fn set_run_as_admin(&mut self, on: bool) {
         use crate::elevation;
-        if on && !elevation::install_task() {
+        // 开机启动的当前选择随任务带过去；管理员模式下它由计划任务的登录触发负责。
+        if on && !elevation::install_task(crate::autostart::enabled()) {
             crate::logutil::write("admin task install failed");
             return;
         }
         if !on {
             elevation::remove_task();
         }
-        if elevation::set_enabled(on).is_err() {
-            crate::logutil::write("admin setting failed");
-        }
-        self.run_as_admin = on;
-        if on && !elevation::is_elevated() && elevation::run_task() {
+        // 开关跟着受保护目录里的标记走。取消 UAC 时标记还在，开关保持打开。
+        self.run_as_admin = if on { true } else { elevation::enabled() };
+        // 撤掉用户 Startup 里的旧项（管理员模式下由登录触发接管）；提权进程里这是空操作。
+        crate::autostart::apply();
+        self.autostart_enabled = crate::autostart::enabled();
+        if on && self.run_as_admin && !elevation::is_elevated() && elevation::run_task() {
             std::process::exit(0);
         }
     }
@@ -2110,20 +2112,43 @@ fn lerp_rect(a: egui::Rect, b: egui::Rect, t: f32) -> egui::Rect {
     egui::Rect::from_min_max(a.min.lerp(b.min, t), a.max.lerp(b.max, t))
 }
 
-fn guide_flag_path() -> std::path::PathBuf {
-    crate::identity::data_dir().join("guide_seen")
+fn guide_flag_path() -> Option<std::path::PathBuf> {
+    crate::identity::runtime_dir().map(|dir| dir.join("guide_seen"))
 }
 
 fn guide_seen() -> bool {
-    guide_flag_path().is_file()
+    let state_flag = guide_flag_path().is_some_and(|path| flag_exists(&path));
+    if state_flag {
+        return true;
+    }
+    let elevated = process_elevated();
+    let user_flag =
+        elevated && flag_exists(&crate::identity::fixed_user_data_dir().join("guide_seen"));
+    guide_already_seen(false, elevated, user_flag)
 }
 
 fn mark_guide_seen() {
-    let path = guide_flag_path();
+    let Some(path) = guide_flag_path() else {
+        return;
+    };
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
     let _ = std::fs::write(path, b"1");
+}
+
+fn flag_exists(path: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|meta| meta.is_file() && !meta.file_type().is_symlink())
+}
+
+/// 提权实例自己的标记优先。没有时，只把用户目录里已有的引导标记当成「看过」。
+fn guide_already_seen(state_flag: bool, elevated: bool, user_flag: bool) -> bool {
+    state_flag || (elevated && user_flag)
+}
+
+fn process_elevated() -> bool {
+    crate::elevation::is_elevated()
 }
 
 fn small(text: impl Into<String>, color: egui::Color32) -> egui::RichText {
@@ -2585,6 +2610,14 @@ mod tests {
     #[test]
     fn update_check_interval_is_24_hours() {
         assert_eq!(UPDATE_CHECK_INTERVAL, Duration::from_secs(24 * 60 * 60));
+    }
+
+    #[test]
+    fn elevated_guide_flag_falls_back_to_user_flag() {
+        assert!(guide_already_seen(true, true, false));
+        assert!(guide_already_seen(false, true, true));
+        assert!(!guide_already_seen(false, true, false));
+        assert!(!guide_already_seen(false, false, true));
     }
 
     #[test]

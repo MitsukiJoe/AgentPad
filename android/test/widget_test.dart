@@ -993,6 +993,49 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  testWidgets(
+    'keeps a manual 60Hz after the refresh migration on a high-refresh display',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({
+        'pointer_hz_peak_v1': true,
+        'pointer_hz': 60,
+        'pointer_hz_manual': true,
+      });
+      final store = PadStore();
+      await store.load();
+      expect(store.pointerHz, 60);
+      expect(store.pointerHzManual, isTrue);
+
+      const ws = MethodChannel('agentpad/ws');
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(ws, (
+        call,
+      ) async {
+        if (call.method == 'displayRefreshHz') return 120.0;
+        return null;
+      });
+      addTearDown(() {
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          ws,
+          null,
+        );
+      });
+
+      await tester.pumpWidget(
+        AgentsPadsApp(store: store, enableAutomaticUpdateChecks: false),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(store.pointerHz, 60);
+      expect(store.pointerHzManual, isTrue);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getInt('pointer_hz'), 60);
+      expect(prefs.getBool('pointer_hz_manual'), isTrue);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
   testWidgets('home modules share one horizontal page gutter', (tester) async {
     SharedPreferences.setMockInitialValues({});
     final store = PadStore();

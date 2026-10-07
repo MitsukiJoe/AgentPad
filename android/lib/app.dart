@@ -340,7 +340,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       store.pointerHzManual = false;
       await prefs.setBool('pointer_hz_peak_v1', true);
     }
-    if (store.pointerHzManual && store.pointerHz != 60) return;
+    if (store.pointerHzManual) return;
     final measured = await NativeWs.displayRefreshHz();
     final next = pointerHzForDisplay(measured);
     if (store.pointerHz == next) return;

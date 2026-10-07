@@ -5,13 +5,32 @@
 //! privileges" task that runs that copy. Later launches, including login
 //! autostart, re-exec through the task with no prompt. Task XML is written
 //! only in that directory and removed after `schtasks /Create`.
+//!
+//! The elevated process must not create or modify anything under the user
+//! profile, Startup folder, or `AGENTPAD_DATA_DIR`. Admin mode is the marker
+//! `%ProgramFiles%\AgentsPads\run_as_admin.txt`, written by the elevated
+//! installer and removed with that directory. Theme, the guide flag, and logs
+//! live in `state\` beside it and keep the inherited Program Files ACL, so
+//! ordinary users can still open logs. Login autostart is applied by the
+//! unelevated starter before re-exec, using that process's own executable.
 
 #[cfg(any(windows, test))]
 const TASK_NAME: &str = "AgentsPads Elevated";
+#[cfg(any(windows, test))]
+const MARKER_FILE: &str = "run_as_admin.txt";
+/// Login autostart in admin mode is a second task with a logon trigger; this
+/// file mirrors whether it is enabled so the settings page can show it.
+#[cfg(any(windows, test))]
+const AUTOSTART_TASK_NAME: &str = "AgentsPads Elevated Autostart";
 #[cfg(windows)]
-const PREFERENCE_FILE: &str = "run_as_admin.txt";
-#[cfg(windows)]
-const LAUNCHER_FILE: &str = "admin_launcher.txt";
+const AUTOSTART_MARKER_FILE: &str = "autostart.txt";
+#[cfg(any(windows, test))]
+const AUTOSTART_FLAG: &str = "--admin-autostart";
+/// Login is busy; this app can wait behind everything else.
+#[cfg(any(windows, test))]
+const LOGON_DELAY: &str = "PT30S";
+#[cfg(any(windows, test))]
+const STATE_DIR: &str = "state";
 #[cfg(windows)]
 const TASK_XML_NAME: &str = "agentspads-task.xml";
 #[cfg(any(windows, test))]
@@ -37,10 +56,11 @@ pub fn relaunch_if_needed() -> bool {
         if run_task() && wait_for_listener() {
             return true;
         }
-        // Task missing or the protected copy is gone: run unelevated and show
-        // the switch as off so the user can re-register it.
+        // Could not hand off to the elevated task. If the protected copy is
+        // gone, enabled() is already false and the switch shows off. A missing
+        // task with the copy still present leaves the switch on. Nothing here
+        // writes the user profile.
         crate::logutil::write("admin relaunch failed");
-        let _ = set_enabled(false);
         false
     }
     #[cfg(not(windows))]
@@ -55,8 +75,8 @@ pub fn exit_if_admin_maintenance() {
     {
         let code = match early_action(std::env::args()) {
             EarlyAction::None => return,
-            EarlyAction::Install(user) => {
-                if install_protected(&user) {
+            EarlyAction::Install(user, autostart) => {
+                if install_protected(&user, autostart) {
                     0
                 } else {
                     1
@@ -72,67 +92,40 @@ pub fn exit_if_admin_maintenance() {
     }
 }
 
+/// Marker file plus the protected copy. Both live under Program Files, so an
+/// ordinary process can read them but cannot turn admin mode on by writing a
+/// user-profile file. A missing scheduled task is noticed when the relaunch
+/// itself fails; this check does not spawn `schtasks`.
 #[cfg(windows)]
 pub fn enabled() -> bool {
-    std::fs::read_to_string(crate::identity::data_dir().join(PREFERENCE_FILE))
-        .is_ok_and(|v| v.trim() == "true")
+    let Some((dir, exe)) = protected_target() else {
+        return false;
+    };
+    admin_mode_enabled(marker_is_set(&dir), exe.is_file())
 }
 
-#[cfg(windows)]
-pub fn set_enabled(on: bool) -> std::io::Result<()> {
-    let dir = crate::identity::data_dir();
-    std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join(PREFERENCE_FILE), on.to_string())
-}
-
-#[cfg(windows)]
 pub fn is_elevated() -> bool {
-    unsafe { windows::Win32::UI::Shell::IsUserAnAdmin().as_bool() }
+    #[cfg(windows)]
+    {
+        unsafe { windows::Win32::UI::Shell::IsUserAnAdmin().as_bool() }
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
 }
 
 /// One UAC prompt, unless this process is already elevated.
 #[cfg(windows)]
-pub fn install_task() -> bool {
+pub fn install_task(autostart: bool) -> bool {
     let (Ok(exe), Some(user)) = (std::env::current_exe(), windows_user()) else {
         return false;
     };
-    if protected_target().is_none_or(|(_, dest)| !same_file(&exe, &dest)) {
-        remember_launcher(&exe);
+    let mut args = vec![INSTALL_FLAG, user.as_str()];
+    if autostart {
+        args.push(AUTOSTART_FLAG);
     }
-    shell_exec_wait(
-        exe.as_os_str(),
-        &join_windows_args(&[INSTALL_FLAG, user.as_str()]),
-    )
-}
-
-#[cfg(windows)]
-pub(crate) fn launcher_for_autostart(current: std::path::PathBuf) -> std::path::PathBuf {
-    let Some((_, protected)) = protected_target() else {
-        return current;
-    };
-    if !same_file(&current, &protected) {
-        return current;
-    }
-    let Ok(text) = std::fs::read_to_string(crate::identity::data_dir().join(LAUNCHER_FILE)) else {
-        return current;
-    };
-    let path = std::path::PathBuf::from(text.trim());
-    if path.is_file() {
-        path
-    } else {
-        current
-    }
-}
-
-#[cfg(windows)]
-fn remember_launcher(path: &std::path::Path) {
-    let Some(text) = path.to_str() else {
-        return;
-    };
-    let dir = crate::identity::data_dir();
-    if std::fs::create_dir_all(&dir).is_ok() {
-        let _ = std::fs::write(dir.join(LAUNCHER_FILE), text);
-    }
+    shell_exec_wait(exe.as_os_str(), &join_windows_args(&args))
 }
 
 /// One UAC prompt, unless this process is already elevated. Failure is ignored.
@@ -206,7 +199,56 @@ pub fn run_task() -> bool {
 }
 
 #[cfg(windows)]
-fn install_protected(user: &str) -> bool {
+fn flag_is_true(path: &std::path::Path) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|value| value.trim() == "true")
+}
+
+#[cfg(windows)]
+fn marker_is_set(dir: &std::path::Path) -> bool {
+    flag_is_true(&dir.join(MARKER_FILE))
+}
+
+#[cfg(windows)]
+fn write_flag(dir: &std::path::Path, file: &str, on: bool) -> bool {
+    std::fs::write(dir.join(file), on.to_string()).is_ok()
+}
+
+/// Admin-mode login autostart state, from the protected directory.
+#[cfg(windows)]
+pub fn autostart_enabled() -> bool {
+    protected_target().is_some_and(|(dir, _)| flag_is_true(&dir.join(AUTOSTART_MARKER_FILE)))
+}
+
+/// Enable or disable the logon-trigger task. Only the elevated instance may do
+/// this (no UAC prompt, and ordinary processes cannot change the task); nothing
+/// in the user profile is touched.
+#[cfg(windows)]
+pub fn set_autostart(on: bool) -> bool {
+    let Some((dir, _)) = protected_target() else {
+        return false;
+    };
+    is_elevated()
+        && schtasks(&[
+            "/Change",
+            "/TN",
+            AUTOSTART_TASK_NAME,
+            if on { "/ENABLE" } else { "/DISABLE" },
+        ])
+        && write_flag(&dir, AUTOSTART_MARKER_FILE, on)
+}
+
+/// Runtime files for the elevated process (theme, guide flag, logs). Not locked
+/// down like `secret\`: callers create it and inherit the Program Files ACL.
+#[cfg(windows)]
+pub(crate) fn protected_state_dir() -> Option<std::path::PathBuf> {
+    let w6432 = std::env::var("ProgramW6432").ok();
+    let files = std::env::var("ProgramFiles").ok();
+    let root = program_files_root(w6432.as_deref(), files.as_deref())?;
+    state_dir_from_program_files(root).map(std::path::PathBuf::from)
+}
+
+#[cfg(windows)]
+fn install_protected(user: &str, autostart: bool) -> bool {
     if !is_elevated() {
         return false;
     }
@@ -220,19 +262,27 @@ fn install_protected(user: &str) -> bool {
         return false;
     };
     let xml_path = dir.join(TASK_XML_NAME);
-    if write_utf16(&xml_path, &task_xml(command, Some(user))).is_err() {
-        return false;
-    }
-    let ok = xml_path
-        .to_str()
-        .is_some_and(|xml| schtasks(&["/Create", "/TN", TASK_NAME, "/XML", xml, "/F"]));
+    let create = |name: &str, xml: String| {
+        write_utf16(&xml_path, &xml).is_ok()
+            && xml_path
+                .to_str()
+                .is_some_and(|path| schtasks(&["/Create", "/TN", name, "/XML", path, "/F"]))
+    };
+    let ok = create(TASK_NAME, task_xml(command, Some(user), None))
+        && create(
+            AUTOSTART_TASK_NAME,
+            task_xml(command, Some(user), Some(autostart)),
+        );
     let _ = std::fs::remove_file(xml_path);
-    ok
+    // Markers only after the tasks exist, so a failed install cannot arm admin mode
+    // against a leftover task. Not secrets: they inherit the Program Files ACL.
+    ok && write_flag(&dir, AUTOSTART_MARKER_FILE, autostart) && write_flag(&dir, MARKER_FILE, true)
 }
 
 #[cfg(windows)]
 fn remove_protected() {
     let _ = schtasks(&["/Delete", "/TN", TASK_NAME, "/F"]);
+    let _ = schtasks(&["/Delete", "/TN", AUTOSTART_TASK_NAME, "/F"]);
     if let Some((dir, _)) = protected_target() {
         if dir.file_name().and_then(|name| name.to_str()) == Some("AgentsPads") {
             let _ = std::fs::remove_dir_all(dir);
@@ -378,6 +428,18 @@ fn program_files_root<'a>(
 }
 
 #[cfg(any(windows, test))]
+fn state_dir_from_program_files(program_files: &str) -> Option<String> {
+    let (dir, _) = protected_install_paths(program_files)?;
+    Some(format!(r"{dir}\{STATE_DIR}"))
+}
+
+/// Marker plus the protected copy. A user-writable preference cannot satisfy either.
+#[cfg(any(windows, test))]
+fn admin_mode_enabled(marker: bool, exe_exists: bool) -> bool {
+    marker && exe_exists
+}
+
+#[cfg(any(windows, test))]
 fn protected_install_paths(program_files: &str) -> Option<(String, String)> {
     let root = program_files.trim_end_matches(['\\', '/']);
     if root.is_empty() || root.chars().all(char::is_whitespace) {
@@ -391,7 +453,7 @@ fn protected_install_paths(program_files: &str) -> Option<(String, String)> {
 #[cfg(any(windows, test))]
 enum EarlyAction {
     None,
-    Install(String),
+    Install(String, bool),
     Remove,
     Bad,
 }
@@ -402,19 +464,20 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    let mut args = args.into_iter();
+    let args: Vec<String> = args.into_iter().map(|a| a.as_ref().to_string()).collect();
+    let mut args = args.iter().map(String::as_str);
     while let Some(arg) = args.next() {
-        match arg.as_ref() {
+        match arg {
             REMOVE_FLAG => return EarlyAction::Remove,
             INSTALL_FLAG => {
                 let Some(user) = args.next() else {
                     return EarlyAction::Bad;
                 };
-                let user = user.as_ref();
                 if user.is_empty() || user.starts_with('-') || user.chars().any(char::is_control) {
                     return EarlyAction::Bad;
                 }
-                return EarlyAction::Install(user.to_string());
+                let autostart = args.any(|a| a == AUTOSTART_FLAG);
+                return EarlyAction::Install(user.to_string(), autostart);
             }
             _ => {}
         }
@@ -459,11 +522,14 @@ fn join_windows_args(args: &[&str]) -> String {
         .join(" ")
 }
 
-/// On-demand only (no trigger): login autostart still goes through the normal
-/// startup entry, which then re-execs via this task. Priority 4 keeps the
-/// process at normal priority; the task default (7) would lag input injection.
+/// `logon: None` is the on-demand task (no trigger, used by manual launches).
+/// `Some(enabled)` is the login-autostart task: same action, plus a delayed
+/// logon trigger, and the whole task is switched with `schtasks /Change
+/// /ENABLE|/DISABLE` (a disabled task cannot be run on demand, so it must be a
+/// separate task). Priority 4 keeps the process at normal priority; the task
+/// default (7) would lag input injection.
 #[cfg(any(windows, test))]
-fn task_xml(exe: &str, user: Option<&str>) -> String {
+fn task_xml(exe: &str, user: Option<&str>, logon: Option<bool>) -> String {
     let esc = |s: &str| {
         s.replace('&', "&amp;")
             .replace('<', "&lt;")
@@ -473,10 +539,23 @@ fn task_xml(exe: &str, user: Option<&str>) -> String {
     let user = user
         .map(|u| format!("<UserId>{}</UserId>", esc(u)))
         .unwrap_or_default();
+    let triggers = if logon.is_some() {
+        format!(
+            "<Triggers><LogonTrigger><Enabled>true</Enabled>{user}<Delay>{LOGON_DELAY}</Delay></LogonTrigger></Triggers>"
+        )
+    } else {
+        String::new()
+    };
+    let enabled = if logon == Some(false) {
+        "\n    <Enabled>false</Enabled>"
+    } else {
+        ""
+    };
     format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo><Description>{TASK_NAME}</Description></RegistrationInfo>
+  {triggers}
   <Principals>
     <Principal id="Author">{user}<LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal>
   </Principals>
@@ -486,7 +565,7 @@ fn task_xml(exe: &str, user: Option<&str>) -> String {
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <AllowStartOnDemand>true</AllowStartOnDemand>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-    <Priority>4</Priority>
+    <Priority>4</Priority>{enabled}
   </Settings>
   <Actions Context="Author">
     <Exec><Command>{}</Command><Arguments>{RELAUNCH_FLAG}</Arguments></Exec>
@@ -504,7 +583,7 @@ mod tests {
     #[test]
     fn task_runs_elevated_on_demand_at_normal_priority() {
         let (_dir, exe) = protected_install_paths(r"C:\Program Files").unwrap();
-        let xml = task_xml(&exe, Some(r"PC\jo"));
+        let xml = task_xml(&exe, Some(r"PC\jo"), None);
         assert!(xml.contains("<RunLevel>HighestAvailable</RunLevel>"));
         assert!(xml.contains("<LogonType>InteractiveToken</LogonType>"));
         assert!(xml.contains(r"<UserId>PC\jo</UserId>"));
@@ -514,9 +593,23 @@ mod tests {
         assert!(xml.contains("<Priority>4</Priority>"));
         assert!(xml.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"));
         assert!(!xml.contains("Trigger"));
-        assert!(!task_xml("a.exe", None).contains("UserId"));
-        let escaped = task_xml(r"C:\Apps\A&B <x>\agentpad.exe", Some(r"PC\jo"));
+        assert!(!task_xml("a.exe", None, None).contains("UserId"));
+        let escaped = task_xml(r"C:\Apps\A&B <x>\agentpad.exe", Some(r"PC\jo"), None);
         assert!(escaped.contains(r"<Command>C:\Apps\A&amp;B &lt;x&gt;\agentpad.exe</Command>"));
+    }
+
+    #[test]
+    fn autostart_task_has_delayed_logon_trigger_and_switchable_state() {
+        let on = task_xml("a.exe", Some(r"PC\jo"), Some(true));
+        assert!(on.contains("<LogonTrigger>"));
+        assert!(on.contains(r"<UserId>PC\jo</UserId><Delay>PT30S</Delay>"));
+        assert!(on.contains("<RunLevel>HighestAvailable</RunLevel>"));
+        assert!(on.contains("<Arguments>--elevated</Arguments>"));
+        assert!(!on.contains("<Enabled>false</Enabled>"));
+        let off = task_xml("a.exe", Some(r"PC\jo"), Some(false));
+        assert!(off.contains("<LogonTrigger>"));
+        assert!(off.contains("<Enabled>false</Enabled>"));
+        assert_ne!(AUTOSTART_TASK_NAME, TASK_NAME);
     }
 
     #[test]
@@ -563,6 +656,23 @@ mod tests {
     }
 
     #[test]
+    fn elevated_runtime_paths_stay_under_program_files() {
+        let state = state_dir_from_program_files(r"C:\Program Files").unwrap();
+        let (dir, _) = protected_install_paths(r"C:\Program Files").unwrap();
+        let marker = format!(r"{dir}\{MARKER_FILE}");
+        assert_eq!(state, r"C:\Program Files\AgentsPads\state");
+        assert_eq!(marker, r"C:\Program Files\AgentsPads\run_as_admin.txt");
+        assert!(!state.contains("AppData"));
+        assert!(!marker.contains("AppData"));
+        assert!(!state.ends_with(r"\secret"));
+        assert_eq!(STATE_DIR, "state");
+        assert!(admin_mode_enabled(true, true));
+        assert!(!admin_mode_enabled(true, false));
+        assert!(!admin_mode_enabled(false, true));
+        assert_eq!(state_dir_from_program_files(""), None);
+    }
+
+    #[test]
     fn admin_maintenance_args_are_quoted_and_parsed() {
         assert_eq!(
             join_windows_args(&[INSTALL_FLAG, r"PC\jo"]),
@@ -576,7 +686,11 @@ mod tests {
         assert_eq!(quote_windows_arg("a b\\"), r#""a b\\""#);
         assert!(matches!(
             early_action(["agentspads.exe", INSTALL_FLAG, r"PC\jo"]),
-            EarlyAction::Install(user) if user == r"PC\jo"
+            EarlyAction::Install(user, false) if user == r"PC\jo"
+        ));
+        assert!(matches!(
+            early_action(["agentspads.exe", INSTALL_FLAG, r"PC\jo", AUTOSTART_FLAG]),
+            EarlyAction::Install(user, true) if user == r"PC\jo"
         ));
         assert!(matches!(
             early_action(["agentspads.exe", REMOVE_FLAG]),

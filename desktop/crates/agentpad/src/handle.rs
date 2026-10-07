@@ -5,6 +5,22 @@ use crate::protocol::{InMsg, OutMsg};
 #[derive(Default)]
 pub struct Conn {
     pub shadow: String,
+    /// 本连接最近一次已经交给注入侧的按键位。0 表示没按着。
+    buttons: u8,
+}
+
+/// 连接退出，或暂停期间收到抬起时，补一次全抬起。没按着则什么都不做。
+pub(crate) fn release_stuck_pointer(conn: &mut Conn) -> Option<Action> {
+    if conn.buttons == 0 {
+        return None;
+    }
+    conn.buttons = 0;
+    Some(Action::Pointer {
+        dx: 0.0,
+        dy: 0.0,
+        buttons: 0,
+        wheel: 0,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -81,14 +97,21 @@ pub fn handle(
             wheel,
         } => {
             if paused {
+                // 暂停时丢掉移动，但本连接还按着键时必须把 buttons:0 转成抬起。
+                let actions = if buttons == 0 {
+                    release_stuck_pointer(conn).into_iter().collect()
+                } else {
+                    Vec::new()
+                };
                 return (
                     vec![OutMsg::Ack {
                         ok: false,
                         clear_input: false,
                     }],
-                    vec![],
+                    actions,
                 );
             }
+            conn.buttons = buttons;
             (
                 vec![],
                 vec![Action::Pointer {
@@ -268,6 +291,7 @@ mod tests {
     fn shadow_mismatch_does_not_clear() {
         let mut c = Conn {
             shadow: "abc".into(),
+            ..Conn::default()
         };
         let (_, a) = handle(
             false,
@@ -287,6 +311,7 @@ mod tests {
     fn submit_pastes_suffix_then_enter() {
         let mut c = Conn {
             shadow: "hi".into(),
+            ..Conn::default()
         };
         let (replies, a) = handle(
             false,
@@ -340,5 +365,67 @@ mod tests {
                 sync_enabled: false
             }]
         );
+    }
+
+    fn pointer_msg(dx: f64, dy: f64, buttons: u8, wheel: i32) -> InMsg {
+        InMsg::Pointer {
+            dx,
+            dy,
+            buttons,
+            wheel,
+        }
+    }
+
+    #[test]
+    fn pause_releases_only_a_stuck_button() {
+        let mut c = Conn::default();
+        let (_, a) = handle(false, true, &mut c, pointer_msg(1.5, -2.0, 1, 0));
+        assert_eq!(
+            a,
+            vec![Action::Pointer {
+                dx: 1.5,
+                dy: -2.0,
+                buttons: 1,
+                wheel: 0,
+            }]
+        );
+        assert_eq!(c.buttons, 1);
+
+        let (_, a) = handle(true, false, &mut c, pointer_msg(9.0, 9.0, 1, 3));
+        assert!(a.is_empty());
+        assert_eq!(c.buttons, 1);
+
+        let (_, a) = handle(true, false, &mut c, pointer_msg(9.0, 8.0, 0, 4));
+        assert_eq!(
+            a,
+            vec![Action::Pointer {
+                dx: 0.0,
+                dy: 0.0,
+                buttons: 0,
+                wheel: 0,
+            }]
+        );
+        assert_eq!(c.buttons, 0);
+
+        let (_, a) = handle(true, false, &mut c, pointer_msg(1.0, 1.0, 0, 0));
+        assert!(a.is_empty());
+        assert!(release_stuck_pointer(&mut c).is_none());
+    }
+
+    #[test]
+    fn release_stuck_pointer_fires_once() {
+        let mut c = Conn::default();
+        assert!(release_stuck_pointer(&mut c).is_none());
+        c.buttons = 1;
+        assert_eq!(
+            release_stuck_pointer(&mut c),
+            Some(Action::Pointer {
+                dx: 0.0,
+                dy: 0.0,
+                buttons: 0,
+                wheel: 0,
+            })
+        );
+        assert!(release_stuck_pointer(&mut c).is_none());
     }
 }

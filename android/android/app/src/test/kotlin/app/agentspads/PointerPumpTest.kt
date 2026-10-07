@@ -156,6 +156,22 @@ class PointerPumpTest {
     }
 
     @Test
+    fun close_ignores_later_adds_and_does_not_send() {
+        val h = Harness()
+
+        h.pump.add("a", 4.0, 0.0, 0, 1, immediate = false)
+        assertEquals(1, h.tasks.size)
+
+        h.pump.close()
+        h.pump.close()
+        h.pump.add("a", 9.0, 3.0, 1, 2, immediate = true)
+
+        assertEquals(1, h.tasks.size)
+        h.drain()
+        assertTrue(h.sent.isEmpty())
+    }
+
+    @Test
     fun immediate_samples_do_not_enqueue_extra_writer_tasks() {
         val h = Harness()
 

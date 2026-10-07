@@ -34,6 +34,7 @@ internal class PointerPump(
     private val handler: Handler?
     private val wake: (Runnable) -> Unit
     private var draining = false
+    private var closed = false
 
     init {
         if (scheduler == null) {
@@ -47,9 +48,23 @@ internal class PointerPump(
         }
     }
 
+    fun close() {
+        synchronized(lock) {
+            if (closed) return
+            closed = true
+            queues.clear()
+            buttonState.clear()
+            pending.clear()
+            draining = false
+        }
+        handler?.removeCallbacksAndMessages(null)
+        thread?.quitSafely()
+    }
+
     fun add(id: String, ddx: Double, ddy: Double, btn: Int, wh: Int, immediate: Boolean) {
         var schedule = false
         synchronized(lock) {
+            if (closed) return
             val edge = (buttonState.put(id, btn) ?: 0) != btn
             val queue = queues.getOrPut(id) { ArrayDeque() }
             val last = queue.peekLast()
@@ -80,7 +95,7 @@ internal class PointerPump(
     override fun run() {
         while (true) {
             val batch = synchronized(lock) {
-                if (pending.isEmpty()) {
+                if (closed || pending.isEmpty()) {
                     draining = false
                     return
                 }

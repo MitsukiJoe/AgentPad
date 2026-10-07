@@ -425,6 +425,7 @@ class WifiWs(
 
     fun dispose() {
         setVisible(false)
+        pointer.close()
         events = null
         methodChannel.setMethodCallHandler(null)
         eventChannel.setStreamHandler(null)

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Identity {
@@ -11,9 +12,74 @@ pub struct Identity {
 }
 
 pub fn data_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("AGENTPAD_DATA_DIR") {
-        return PathBuf::from(p);
+    runtime_dir().unwrap_or_else(fallback_runtime_dir)
+}
+
+/// 提权进程的可写运行时目录。拿不到受保护目录时返回 None，调用方不得改走用户目录。
+pub(crate) fn runtime_dir() -> Option<PathBuf> {
+    let elevated = crate::elevation::is_elevated();
+    let protected = elevated_state_dir(elevated);
+    select_runtime_dir(
+        std::env::var("AGENTPAD_DATA_DIR").ok().as_deref(),
+        elevated,
+        protected.as_deref(),
+        &platform_user_dir(),
+    )
+}
+
+fn elevated_state_dir(elevated: bool) -> Option<PathBuf> {
+    if !elevated {
+        return None;
     }
+    #[cfg(windows)]
+    {
+        // 标记已删除时，仍在运行的提权进程不要把受保护目录再建回来，也不要改走用户目录。
+        if !crate::elevation::enabled() {
+            return None;
+        }
+        crate::elevation::protected_state_dir()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+fn fallback_runtime_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        unwritable_elevated_dir()
+    }
+    #[cfg(not(windows))]
+    {
+        platform_user_dir()
+    }
+}
+
+#[cfg(windows)]
+fn unwritable_elevated_dir() -> PathBuf {
+    // Program Files 缺失时的占位。这个路径创建不了，主题、引导和日志会静默跳过。
+    PathBuf::from(r"\\.\NUL\AgentsPads\state")
+}
+
+/// 普通用户数据目录。提权进程只把它用于过滤后的只读，并且忽略 AGENTPAD_DATA_DIR。
+pub(crate) fn fixed_user_data_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        std::env::var("APPDATA")
+            .ok()
+            .map(|dir| dir.trim().to_string())
+            .filter(|dir| !dir.is_empty())
+            .map(|dir| PathBuf::from(dir).join("AgentsPads"))
+            .unwrap_or_else(|| PathBuf::from(r"\\.\NUL\AgentsPads"))
+    }
+    #[cfg(not(windows))]
+    {
+        platform_user_dir()
+    }
+}
+
+fn platform_user_dir() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
         home().join("Library/Application Support/AgentsPads")
@@ -24,14 +90,55 @@ pub fn data_dir() -> PathBuf {
     }
 }
 
-pub fn log_dir() -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        home().join("Library/Logs/AgentsPads")
+/// 提权时只用受保护目录，环境变量和用户目录都不参与。未提权时环境变量优先。
+fn select_runtime_dir(
+    env_override: Option<&str>,
+    elevated: bool,
+    protected_state: Option<&Path>,
+    user_dir: &Path,
+) -> Option<PathBuf> {
+    if elevated {
+        return protected_state.map(Path::to_path_buf);
     }
+    match env_override.map(str::trim).filter(|path| !path.is_empty()) {
+        Some(path) => Some(PathBuf::from(path)),
+        None => Some(user_dir.to_path_buf()),
+    }
+}
+
+pub fn log_dir() -> PathBuf {
+    writable_log_dir().unwrap_or_else(|| {
+        #[cfg(windows)]
+        {
+            unwritable_elevated_dir().join("logs")
+        }
+        #[cfg(not(windows))]
+        {
+            home().join("Library/Logs/AgentsPads")
+        }
+    })
+}
+
+fn writable_log_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        data_dir().join("logs")
+        select_log_dir(true, runtime_dir().as_deref(), Path::new(""))
+    }
+    #[cfg(not(windows))]
+    {
+        select_log_dir(false, None, &home().join("Library/Logs/AgentsPads"))
+    }
+}
+
+fn select_log_dir(
+    windows_layout: bool,
+    runtime: Option<&Path>,
+    macos_logs: &Path,
+) -> Option<PathBuf> {
+    if windows_layout {
+        runtime.map(|dir| dir.join("logs"))
+    } else {
+        Some(macos_logs.to_path_buf())
     }
 }
 
@@ -64,12 +171,21 @@ pub fn save(id: &Identity) -> std::io::Result<()> {
     write_json(&data_dir().join("identity.json"), id)
 }
 
-/// 只读，不写盘（管理员实例不能往用户可写目录里写文件）。
+/// 只读，不写盘。提权时读的是普通用户目录里的 identity.json（忽略 AGENTPAD_DATA_DIR），
+/// 只为带走 device_id 和展示名；密钥在 `admin_seed_base` 里丢掉。
 fn read_normal() -> Option<Identity> {
-    let s = std::fs::read_to_string(data_dir().join("identity.json")).ok()?;
-    serde_json::from_str::<Identity>(&s)
+    let text = read_capped(&identity_read_dir().join("identity.json"), 4096)?;
+    serde_json::from_str::<Identity>(&text)
         .ok()
         .filter(|id| !id.device_id.is_empty())
+}
+
+fn identity_read_dir() -> PathBuf {
+    if crate::elevation::is_elevated() {
+        fixed_user_data_dir()
+    } else {
+        data_dir()
+    }
 }
 
 fn load_normal() -> Identity {
@@ -108,8 +224,8 @@ fn load_admin() -> std::io::Result<Identity> {
     if let Some(id) = saved {
         return Ok(id);
     }
-    // 首次进入管理员模式：新密钥，手机需重新扫码。
-    let id = seed(read_normal());
+    // 首次进入管理员模式：新密钥，手机需重新扫码。用户文件只提供过滤后的 device_id 与展示名。
+    let id = seed(read_normal().map(admin_seed_base));
     write_json(&path, &id)?;
     Ok(id)
 }
@@ -121,17 +237,76 @@ fn write_json(path: &std::path::Path, id: &Identity) -> std::io::Result<()> {
     std::fs::write(path, serde_json::to_vec_pretty(id).unwrap())
 }
 
-pub fn load_theme() -> String {
-    std::fs::read_to_string(data_dir().join("theme.txt"))
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| s == "light" || s == "dark" || s == "system")
+/// 用户目录里的身份只接受 UUID 和干净的展示名，密钥一律丢掉。
+#[cfg(any(windows, test))]
+fn admin_seed_base(id: Identity) -> Identity {
+    let device_id = if uuid::Uuid::parse_str(id.device_id.trim()).is_ok() {
+        id.device_id.trim().to_string()
+    } else {
+        uuid::Uuid::new_v4().to_string()
+    };
+    Identity {
+        device_id,
+        name: sanitize_display_name(&id.name),
+        secret: String::new(),
+    }
+}
+
+#[cfg(any(windows, test))]
+fn sanitize_display_name(name: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 64 || name.chars().any(char::is_control) {
+        whoami::fallible::hostname().unwrap_or_else(|_| "AgentsPads".into())
+    } else {
+        name.to_string()
+    }
+}
+
+fn read_capped(path: &Path, max: usize) -> Option<String> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > max as u64 {
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;
+    let mut buf = Vec::new();
+    file.take(max as u64 + 1).read_to_end(&mut buf).ok()?;
+    if buf.len() > max {
+        return None;
+    }
+    String::from_utf8(buf).ok()
+}
+
+fn resolve_theme(primary: Option<&str>, elevated: bool, user_theme: Option<&str>) -> String {
+    fn accept(text: Option<&str>) -> Option<String> {
+        let text = text?.trim();
+        if text == "light" || text == "dark" || text == "system" {
+            Some(text.to_string())
+        } else {
+            None
+        }
+    }
+    accept(primary)
+        .or_else(|| if elevated { accept(user_theme) } else { None })
         .unwrap_or_else(|| "system".into())
 }
 
+pub fn load_theme() -> String {
+    let elevated = crate::elevation::is_elevated();
+    let primary = runtime_dir().and_then(|dir| read_capped(&dir.join("theme.txt"), 32));
+    let user = if elevated {
+        read_capped(&fixed_user_data_dir().join("theme.txt"), 32)
+    } else {
+        None
+    };
+    resolve_theme(primary.as_deref(), elevated, user.as_deref())
+}
+
 pub fn save_theme(theme: &str) {
-    let _ = std::fs::create_dir_all(data_dir());
-    let _ = std::fs::write(data_dir().join("theme.txt"), theme);
+    let Some(dir) = runtime_dir() else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(dir.join("theme.txt"), theme);
 }
 
 #[cfg(test)]
@@ -168,5 +343,64 @@ mod tests {
         assert_eq!(admin.name, normal.name);
         assert_eq!(admin.secret.len(), 64);
         assert_ne!(admin.secret, normal.secret);
+    }
+
+    #[test]
+    fn elevated_runtime_dir_ignores_user_controlled_paths() {
+        let user = Path::new(r"C:\Users\me\AppData\Roaming\AgentsPads");
+        let protected = Path::new(r"C:\Program Files\AgentsPads\state");
+        let env = Some(r"D:\attacker\link");
+        assert_eq!(
+            select_runtime_dir(env, true, Some(protected), user).as_deref(),
+            Some(protected)
+        );
+        assert_eq!(select_runtime_dir(env, true, None, user), None);
+        let logs = select_log_dir(true, Some(protected), Path::new("unused")).unwrap();
+        assert_eq!(logs, protected.join("logs"));
+        assert_eq!(select_log_dir(true, None, Path::new("unused")), None);
+        assert_eq!(
+            select_runtime_dir(env, false, Some(protected), user).as_deref(),
+            Some(Path::new(r"D:\attacker\link"))
+        );
+        assert_eq!(
+            select_runtime_dir(Some("  "), false, None, user).as_deref(),
+            Some(user)
+        );
+        let user_logs = select_log_dir(true, Some(user), Path::new("unused")).unwrap();
+        assert_eq!(user_logs, user.join("logs"));
+        let macos = Path::new("/Users/me/Library/Logs/AgentsPads");
+        assert_eq!(select_log_dir(false, None, macos).as_deref(), Some(macos));
+    }
+
+    #[test]
+    fn elevated_theme_falls_back_to_a_filtered_user_value() {
+        assert_eq!(resolve_theme(Some("dark"), true, Some("light")), "dark");
+        assert_eq!(resolve_theme(Some("nope"), true, Some(" light ")), "light");
+        assert_eq!(resolve_theme(None, true, Some("../x")), "system");
+        assert_eq!(resolve_theme(None, false, Some("dark")), "system");
+        assert_eq!(resolve_theme(Some("system"), false, None), "system");
+    }
+
+    #[test]
+    fn admin_seed_drops_unsafe_user_identity_fields() {
+        let good = admin_seed_base(Identity {
+            device_id: "11111111-2222-4333-8444-555555555555".into(),
+            name: "  Desk  ".into(),
+            secret: "c".repeat(64),
+        });
+        assert_eq!(good.device_id, "11111111-2222-4333-8444-555555555555");
+        assert_eq!(good.name, "Desk");
+        assert!(good.secret.is_empty());
+
+        let bad = admin_seed_base(Identity {
+            device_id: "../not-a-uuid".into(),
+            name: "bad\nname".into(),
+            secret: "b".repeat(64),
+        });
+        assert!(uuid::Uuid::parse_str(&bad.device_id).is_ok());
+        assert_ne!(bad.device_id, "../not-a-uuid");
+        assert!(!bad.name.chars().any(char::is_control));
+        assert!(!bad.name.is_empty());
+        assert!(bad.secret.is_empty());
     }
 }

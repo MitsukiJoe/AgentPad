@@ -18,6 +18,15 @@ fn session() -> &'static Mutex<Session> {
     SESSION.get_or_init(|| Mutex::new(Session::default()))
 }
 
+/// 提权但没有可写的受保护目录时返回 None，调用方不要创建占位路径。
+fn log_directory() -> Option<std::path::PathBuf> {
+    if crate::elevation::is_elevated() && crate::identity::runtime_dir().is_none() {
+        None
+    } else {
+        Some(identity::log_dir())
+    }
+}
+
 pub fn enabled() -> bool {
     session().lock().unwrap().enabled
 }
@@ -39,10 +48,13 @@ pub fn set_enabled(enabled: bool) {
         return;
     }
     *state = Session::default();
-    if enabled && clear_files(&identity::log_dir()).is_ok() {
+    let Some(dir) = log_directory() else {
+        return;
+    };
+    if enabled && clear_files(&dir).is_ok() {
         state.enabled = true;
         state.window = Some(Instant::now());
-        append(&identity::log_dir(), "diagnostics session started");
+        append(&dir, "diagnostics session started");
         static FLUSHER: Once = Once::new();
         FLUSHER.call_once(|| {
             std::thread::spawn(|| loop {
@@ -57,7 +69,11 @@ pub fn clear() {
     let mut state = session().lock().unwrap();
     state.pointers = [0; 4];
     state.window = Some(Instant::now());
-    if clear_files(&identity::log_dir()).is_err() {
+    let failed = match log_directory() {
+        Some(dir) => clear_files(&dir).is_err(),
+        None => true,
+    };
+    if failed {
         state.enabled = false;
     }
 }
@@ -91,7 +107,9 @@ fn append(dir: &Path, msg: &str) {
 pub fn write(msg: &'static str) {
     let state = session().lock().unwrap();
     if state.enabled {
-        append(&identity::log_dir(), msg);
+        if let Some(dir) = log_directory() {
+            append(&dir, msg);
+        }
     }
 }
 
@@ -102,9 +120,9 @@ pub fn operation(category: &'static str, injecting: bool, success: bool) {
     }
     if category == "[鼠标位移][鼠标按键][滚轮]" {
         state.pointers[usize::from(injecting) * 2 + usize::from(!success)] += 1;
-    } else {
+    } else if let Some(dir) = log_directory() {
         append(
-            &identity::log_dir(),
+            &dir,
             &format!(
                 "{category} {} {}",
                 if injecting { "inject" } else { "receive" },
@@ -123,10 +141,15 @@ fn flush_pointer_window() {
     if elapsed.as_secs() < 1 {
         return;
     }
+    let Some(dir) = log_directory() else {
+        state.pointers = [0; 4];
+        state.window = Some(Instant::now());
+        return;
+    };
     for (index, count) in state.pointers.iter().enumerate() {
         if *count > 0 {
             append(
-                &identity::log_dir(),
+                &dir,
                 &format!(
                     "[鼠标位移][鼠标按键][滚轮] {} {} count={count} window_ms={}",
                     if index < 2 { "receive" } else { "inject" },
@@ -168,7 +191,9 @@ pub fn input_category(msg: &crate::protocol::InMsg) -> &'static str {
 }
 
 pub fn open_dir() {
-    let dir = identity::log_dir();
+    let Some(dir) = log_directory() else {
+        return;
+    };
     let _ = std::fs::create_dir_all(&dir);
     #[cfg(target_os = "macos")]
     {

@@ -1,10 +1,12 @@
-use std::net::SocketAddr;
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::handle::{self, Conn};
@@ -16,6 +18,23 @@ const POST_UPDATE_BIND_ATTEMPTS: usize = 50;
 const POST_UPDATE_BIND_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 const AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const MAX_AUTH_BYTES: usize = 4 * 1024;
+const MAX_UNAUTH: usize = 32;
+const MAX_UNAUTH_PER_IP: usize = 4;
+/// 入站消息和单帧共用。见 `ws_config`。
+const WS_MAX_INBOUND: usize = 4 << 20;
+
+/// tokio-tungstenite 0.26 的 `WebSocketStream` 只暴露 `get_config`，没有 `set_config`
+/// （内部 `tungstenite::WebSocket::set_config` 够不着）。认证前后只能同一套上限。
+/// 4MiB 盖住已有的 1MiB 首包测试和认证后的长文本，同时把默认 64MiB 消息 / 16MiB 帧压下来。
+/// 读缓冲从默认 128KiB 降到 8KiB；写缓冲给不读数据的对端一个有限上限。
+fn ws_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .read_buffer_size(8 * 1024)
+        .write_buffer_size(4 * 1024)
+        .max_write_buffer_size(64 * 1024)
+        .max_message_size(Some(WS_MAX_INBOUND))
+        .max_frame_size(Some(WS_MAX_INBOUND))
+}
 
 pub struct AppState {
     /// `identity.secret` 只是启动时的值；当前密钥以 `secret()` 为准。
@@ -24,6 +43,8 @@ pub struct AppState {
     pub pairing: Mutex<Pairing>,
     pub paused: AtomicBool,
     pub clients: Mutex<Vec<mpsc::UnboundedSender<OutMsg>>>,
+    /// 还没完成首条认证的连接。认证结束就释放，长连接不占名额。
+    unauth: Mutex<UnauthSlots>,
 }
 
 impl AppState {
@@ -34,6 +55,24 @@ impl AppState {
             pairing: Mutex::new(Pairing::default()),
             paused: AtomicBool::new(false),
             clients: Mutex::new(Vec::new()),
+            unauth: Mutex::new(UnauthSlots::default()),
+        })
+    }
+
+    /// 未认证名额。满了返回 None，调用方直接丢掉这条 TCP。
+    fn try_reserve_unauth(self: &Arc<Self>, ip: IpAddr) -> Option<UnauthGuard> {
+        let mut slots = self.unauth.lock().unwrap();
+        // ponytail: 未认证只计全局 32 和单 IP 4，不做按秒或按字节的速率限制；名额不够再收紧。
+        let ip_count = slots.by_ip.get(&ip).copied().unwrap_or(0);
+        if slots.total >= MAX_UNAUTH || ip_count >= MAX_UNAUTH_PER_IP {
+            return None;
+        }
+        slots.total += 1;
+        slots.by_ip.insert(ip, ip_count + 1);
+        drop(slots);
+        Some(UnauthGuard {
+            state: Arc::clone(self),
+            ip,
         })
     }
 
@@ -118,14 +157,47 @@ pub async fn serve_with_retry(
     unreachable!("retry loop always returns")
 }
 
+#[derive(Default)]
+struct UnauthSlots {
+    total: usize,
+    by_ip: HashMap<IpAddr, usize>,
+}
+
+/// 认证阶段占用的名额。任意退出路径都在 Drop 里归还。
+struct UnauthGuard {
+    state: Arc<AppState>,
+    ip: IpAddr,
+}
+
+impl Drop for UnauthGuard {
+    fn drop(&mut self) {
+        let mut slots = self.state.unauth.lock().unwrap();
+        slots.total = slots.total.saturating_sub(1);
+        if let Some(count) = slots.by_ip.get_mut(&self.ip) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                slots.by_ip.remove(&self.ip);
+            }
+        }
+    }
+}
+
 async fn accept_loop(listener: TcpListener, state: Arc<AppState>) {
     loop {
         match listener.accept().await {
-            Ok((stream, _peer)) => {
+            Ok((stream, peer)) => {
+                let Some(guard) = state.try_reserve_unauth(peer.ip()) else {
+                    drop(stream);
+                    crate::logutil::write("connection unauth limit");
+                    continue;
+                };
                 crate::logutil::write("connection accept ok");
                 let state = state.clone();
                 tokio::spawn(async move {
-                    if handle_socket(stream, state).await.is_err() {
+                    if handle_socket(stream, state, guard, AUTH_TIMEOUT)
+                        .await
+                        .is_err()
+                    {
                         crate::logutil::write("connection session failed");
                     }
                 });
@@ -142,6 +214,11 @@ fn enable_pointer_tcp(stream: &TcpStream) {
 }
 
 fn enqueue_pointer(actions: Vec<handle::Action>) {
+    #[cfg(test)]
+    if let Some(tx) = pointer_capture().lock().unwrap().as_ref().cloned() {
+        let _ = tx.send(actions);
+        return;
+    }
     static TX: std::sync::OnceLock<std::sync::mpsc::Sender<Vec<handle::Action>>> =
         std::sync::OnceLock::new();
     let tx = TX.get_or_init(|| {
@@ -153,6 +230,13 @@ fn enqueue_pointer(actions: Vec<handle::Action>) {
         tx
     });
     let _ = tx.send(actions);
+}
+
+#[cfg(test)]
+fn pointer_capture() -> &'static Mutex<Option<std::sync::mpsc::Sender<Vec<handle::Action>>>> {
+    static SLOT: std::sync::OnceLock<Mutex<Option<std::sync::mpsc::Sender<Vec<handle::Action>>>>> =
+        std::sync::OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
 }
 
 fn run_pointer_queue(
@@ -208,32 +292,46 @@ fn merge_pointer_batch(
     }
 }
 
+async fn read_first_text(ws: &mut tokio_tungstenite::WebSocketStream<TcpStream>) -> Option<String> {
+    while let Some(Ok(frame)) = ws.next().await {
+        match frame {
+            Message::Text(text) => return Some(text.to_string()),
+            Message::Close(_) => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
 async fn handle_socket(
     stream: TcpStream,
     state: Arc<AppState>,
+    unauth: UnauthGuard,
+    auth_timeout: std::time::Duration,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     enable_pointer_tcp(&stream);
-    let mut ws = tokio_tungstenite::accept_async(stream).await?;
-    let nonce = pairing::random_hex(16);
-    let challenge = OutMsg::Challenge {
-        nonce: nonce.clone(),
-        device_id: state.identity.device_id.clone(),
-    };
-    ws.send(Message::Text(serde_json::to_string(&challenge)?.into()))
-        .await?;
-    let first = tokio::time::timeout(AUTH_TIMEOUT, async {
-        while let Some(Ok(frame)) = ws.next().await {
-            match frame {
-                Message::Text(text) => return Some(text),
-                Message::Close(_) => return None,
-                _ => {}
-            }
-        }
-        None
+    // 从 TCP 接入到首条认证消息读完，共用同一个截止时间。超时丢掉整个 future，连接一起关。
+    let opened = tokio::time::timeout(auth_timeout, async {
+        let mut ws = tokio_tungstenite::accept_async_with_config(stream, Some(ws_config())).await?;
+        let nonce = pairing::random_hex(16);
+        let challenge = OutMsg::Challenge {
+            nonce: nonce.clone(),
+            device_id: state.identity.device_id.clone(),
+        };
+        ws.send(Message::Text(serde_json::to_string(&challenge)?.into()))
+            .await?;
+        let first = read_first_text(&mut ws).await;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((ws, nonce, first))
     })
-    .await
-    .ok()
-    .flatten();
+    .await;
+    let (mut ws, nonce, first) = match opened {
+        Ok(Ok(ready)) => ready,
+        Ok(Err(err)) => return Err(err),
+        Err(_elapsed) => {
+            crate::logutil::write("connection auth timeout");
+            return Ok(());
+        }
+    };
     let first = first
         .filter(|text| text.len() <= MAX_AUTH_BYTES)
         .and_then(|text| serde_json::from_str::<InMsg>(&text).ok());
@@ -248,7 +346,10 @@ async fn handle_socket(
         verdict
     });
     let secret = match verdict {
-        Ok(secret) => secret,
+        Ok(secret) => {
+            drop(unauth);
+            secret
+        }
         Err(reason) => {
             crate::logutil::write("connection auth failed");
             let failed = OutMsg::AuthFailed { reason };
@@ -278,44 +379,52 @@ async fn handle_socket(
 
     let (mut sink, mut source) = ws.split();
     let mut conn = Conn::default();
-
-    loop {
-        tokio::select! {
-            out = rx.recv() => {
-                let Some(msg) = out else { break; };
-                sink.send(Message::Text(serde_json::to_string(&msg)?.into())).await?;
-                crate::logutil::write("message send ok");
-            }
-            incoming = source.next() => {
-                let Some(frame) = incoming else { break; };
-                let Message::Text(text) = frame? else { continue; };
-                let Ok(msg) = serde_json::from_str::<InMsg>(&text) else {
-                    crate::logutil::write("message parse failed");
-                    continue;
-                };
-                let paused = state.paused.load(Ordering::SeqCst);
-                crate::logutil::operation(crate::logutil::input_category(&msg), false, !paused || matches!(msg, InMsg::Hello { .. } | InMsg::Ping));
-                let pointer = matches!(msg, InMsg::Pointer { .. });
-                let (replies, actions) = handle::handle(paused, state.sync_enabled(), &mut conn, msg);
-                if !actions.is_empty() {
-                    if actions
-                        .iter()
-                        .all(|a| matches!(a, handle::Action::Pointer { .. }))
-                    {
-                        enqueue_pointer(actions);
-                    } else {
-                        tokio::task::block_in_place(|| handle::apply_actions(&actions));
-                    }
+    // 内层 future 吸收读写上的 `?`，无论 break、出错还是被重置密钥踢掉，外层都先抬起按键。
+    let session = async {
+        loop {
+            tokio::select! {
+                out = rx.recv() => {
+                    let Some(msg) = out else { break; };
+                    sink.send(Message::Text(serde_json::to_string(&msg)?.into())).await?;
+                    crate::logutil::write("message send ok");
                 }
-                for r in replies {
-                    sink.send(Message::Text(serde_json::to_string(&r)?.into())).await?;
-                    if !pointer {
-                        crate::logutil::write("message send ok");
+                incoming = source.next() => {
+                    let Some(frame) = incoming else { break; };
+                    let Message::Text(text) = frame? else { continue; };
+                    let Ok(msg) = serde_json::from_str::<InMsg>(&text) else {
+                        crate::logutil::write("message parse failed");
+                        continue;
+                    };
+                    let paused = state.paused.load(Ordering::SeqCst);
+                    crate::logutil::operation(crate::logutil::input_category(&msg), false, !paused || matches!(msg, InMsg::Hello { .. } | InMsg::Ping));
+                    let pointer = matches!(msg, InMsg::Pointer { .. });
+                    let (replies, actions) = handle::handle(paused, state.sync_enabled(), &mut conn, msg);
+                    if !actions.is_empty() {
+                        if actions
+                            .iter()
+                            .all(|a| matches!(a, handle::Action::Pointer { .. }))
+                        {
+                            enqueue_pointer(actions);
+                        } else {
+                            tokio::task::block_in_place(|| handle::apply_actions(&actions));
+                        }
+                    }
+                    for r in replies {
+                        sink.send(Message::Text(serde_json::to_string(&r)?.into())).await?;
+                        if !pointer {
+                            crate::logutil::write("message send ok");
+                        }
                     }
                 }
             }
         }
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     }
+    .await;
+    if let Some(action) = handle::release_stuck_pointer(&mut conn) {
+        enqueue_pointer(vec![action]);
+    }
+    session?;
     crate::logutil::write("connection session closed");
     Ok(())
 }
@@ -721,6 +830,204 @@ mod tests {
         assert_eq!(v["ok"], false);
     }
 
+    #[test]
+    fn unauth_slots_cap_per_ip_and_global_then_release() {
+        let state = AppState::new(test_identity());
+        let ip_a = IpAddr::from([192, 0, 2, 1]);
+        let mut held = Vec::new();
+        for _ in 0..MAX_UNAUTH_PER_IP {
+            held.push(state.try_reserve_unauth(ip_a).unwrap());
+        }
+        assert!(state.try_reserve_unauth(ip_a).is_none());
+        let ip_b = IpAddr::from([192, 0, 2, 2]);
+        held.push(state.try_reserve_unauth(ip_b).unwrap());
+
+        let mut rest = Vec::new();
+        for n in 0..(MAX_UNAUTH - held.len()) {
+            let ip = IpAddr::from([198, 51, 100, (n + 1) as u8]);
+            rest.push(state.try_reserve_unauth(ip).unwrap());
+        }
+        assert_eq!(state.unauth.lock().unwrap().total, MAX_UNAUTH);
+        assert!(state
+            .try_reserve_unauth(IpAddr::from([203, 0, 113, 1]))
+            .is_none());
+
+        held.remove(0);
+        assert!(state.try_reserve_unauth(ip_a).is_some());
+        rest.pop();
+        assert!(state
+            .try_reserve_unauth(IpAddr::from([203, 0, 113, 2]))
+            .is_some());
+        drop(held);
+        drop(rest);
+        assert_eq!(state.unauth.lock().unwrap().total, 0);
+        assert!(state.unauth.lock().unwrap().by_ip.is_empty());
+    }
+
+    async fn wait_unauth(state: &AppState, total: usize) {
+        let wait = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while state.unauth.lock().unwrap().total != total {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(
+            wait.is_ok(),
+            "unauth total stayed {}",
+            state.unauth.lock().unwrap().total
+        );
+    }
+
+    async fn tcp_closed_within(stream: &mut TcpStream, limit: std::time::Duration) -> bool {
+        use tokio::io::AsyncReadExt;
+        let mut buf = [0u8; 8];
+        matches!(
+            tokio::time::timeout(limit, stream.read(&mut buf)).await,
+            Ok(Ok(0)) | Ok(Err(_))
+        )
+    }
+
+    #[tokio::test]
+    async fn unauth_cap_rejects_extra_tcp_and_releases_when_it_ends() {
+        let state = AppState::new(test_identity());
+        let addr = serve(state.clone(), "127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+
+        let (mut bad, reply) = open(addr, |_| r#"{"type":"ping"}"#.to_string()).await;
+        assert_eq!(reply.unwrap()["reason"], "unauthenticated");
+        assert!(next_json(&mut bad).await.is_none());
+        wait_unauth(&state, 0).await;
+
+        let (mut authed, reply) = open(addr, |n| hello("s3cret", n)).await;
+        assert_eq!(reply.unwrap()["type"], "connected");
+        assert_eq!(state.unauth.lock().unwrap().total, 0);
+
+        let mut hangs = Vec::new();
+        for _ in 0..MAX_UNAUTH_PER_IP {
+            hangs.push(TcpStream::connect(addr).await.unwrap());
+        }
+        wait_unauth(&state, MAX_UNAUTH_PER_IP).await;
+
+        let mut extra = TcpStream::connect(addr).await.unwrap();
+        assert!(tcp_closed_within(&mut extra, std::time::Duration::from_secs(2)).await);
+        assert_eq!(state.unauth.lock().unwrap().total, MAX_UNAUTH_PER_IP);
+
+        drop(hangs);
+        wait_unauth(&state, 0).await;
+        authed
+            .send(Message::Text(r#"{"type":"ping"}"#.into()))
+            .await
+            .unwrap();
+        assert_eq!(next_json(&mut authed).await.unwrap()["type"], "pong");
+    }
+
+    #[tokio::test]
+    async fn stalled_handshake_closes_at_injected_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let state = AppState::new(test_identity());
+        let server_state = state.clone();
+        let server = tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            let guard = server_state.try_reserve_unauth(peer.ip()).unwrap();
+            let started = std::time::Instant::now();
+            let result = super::handle_socket(
+                stream,
+                server_state.clone(),
+                guard,
+                std::time::Duration::from_millis(300),
+            )
+            .await;
+            (
+                started.elapsed(),
+                result,
+                server_state.unauth.lock().unwrap().total,
+            )
+        });
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        assert!(!tcp_closed_within(&mut client, std::time::Duration::from_millis(80)).await);
+        assert!(tcp_closed_within(&mut client, std::time::Duration::from_secs(2)).await);
+        let (elapsed, result, left) =
+            tokio::time::timeout(std::time::Duration::from_secs(3), server)
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(left, 0);
+        assert!(elapsed < std::time::Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn silent_client_after_challenge_closes_at_same_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let state = AppState::new(test_identity());
+        let server_state = state.clone();
+        let server = tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            let guard = server_state.try_reserve_unauth(peer.ip()).unwrap();
+            super::handle_socket(
+                stream,
+                server_state,
+                guard,
+                std::time::Duration::from_millis(800),
+            )
+            .await
+        });
+        let (mut ws, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            connect_async(format!("ws://{addr}")),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let challenge = tokio::time::timeout(std::time::Duration::from_secs(2), next_json(&mut ws))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(challenge["type"], "challenge");
+        let early =
+            tokio::time::timeout(std::time::Duration::from_millis(150), next_json(&mut ws)).await;
+        assert!(early.is_err(), "closed before the deadline");
+        let later = tokio::time::timeout(std::time::Duration::from_secs(2), next_json(&mut ws))
+            .await
+            .unwrap();
+        assert!(later.is_none());
+        assert!(server.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn oversized_frame_is_rejected_before_the_body() {
+        use tokio::io::AsyncWriteExt;
+        let state = AppState::new(test_identity());
+        let addr = serve(state, "127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let (mut ws, _) = connect_async(format!("ws://{addr}")).await.unwrap();
+        let challenge = next_json(&mut ws).await.unwrap();
+        assert_eq!(challenge["type"], "challenge");
+        let mut header = [0u8; 14];
+        header[0] = 0x81;
+        header[1] = 0xFF;
+        header[2..10].copy_from_slice(&(WS_MAX_INBOUND as u64 + 1).to_be_bytes());
+        {
+            let tokio_tungstenite::MaybeTlsStream::Plain(tcp) = ws.get_mut() else {
+                panic!("expected plain tcp");
+            };
+            tcp.write_all(&header).await.unwrap();
+            tcp.flush().await.unwrap();
+        }
+        let reply = tokio::time::timeout(std::time::Duration::from_secs(2), next_json(&mut ws))
+            .await
+            .expect("oversized frame was not rejected");
+        match reply {
+            None => {}
+            Some(value) => {
+                assert_eq!(value["type"], "auth_failed");
+                assert_eq!(value["reason"], "unauthenticated");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn accepted_socket_disables_nagle() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -732,5 +1039,209 @@ mod tests {
         });
         let _client = tokio::net::TcpStream::connect(addr).await.unwrap();
         assert!(server.await.unwrap());
+    }
+
+    fn button_up() -> handle::Action {
+        handle::Action::Pointer {
+            dx: 0.0,
+            dy: 0.0,
+            buttons: 0,
+            wheel: 0,
+        }
+    }
+
+    fn pointer_json(dx: f64, dy: f64, buttons: u8, wheel: i32) -> String {
+        format!(r#"{{"type":"pointer","dx":{dx},"dy":{dy},"buttons":{buttons},"wheel":{wheel}}}"#)
+    }
+
+    /// 把指针动作拦在注入线程外面，测试里不会碰到真的键鼠。
+    struct PointerCapture {
+        rx: std::sync::mpsc::Receiver<Vec<handle::Action>>,
+        _gate: tokio::sync::MutexGuard<'static, ()>,
+    }
+
+    impl PointerCapture {
+        async fn install() -> Self {
+            static GATE: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+            let gate = GATE
+                .get_or_init(|| tokio::sync::Mutex::new(()))
+                .lock()
+                .await;
+            let (tx, rx) = std::sync::mpsc::channel();
+            *super::pointer_capture().lock().unwrap() = Some(tx);
+            Self { rx, _gate: gate }
+        }
+
+        async fn recv(&self) -> Vec<handle::Action> {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                match self.rx.try_recv() {
+                    Ok(batch) => return batch,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        panic!("pointer capture closed")
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        if tokio::time::Instant::now() >= deadline {
+                            panic!("timed out waiting for pointer action");
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                }
+            }
+        }
+
+        /// 这段时间里让出运行时，确认没有再入队。阻塞等待会冻住当前线程上的服务端任务。
+        async fn quiet(&self, limit: std::time::Duration) -> bool {
+            let start = tokio::time::Instant::now();
+            while start.elapsed() < limit {
+                if self.rx.try_recv().is_ok() {
+                    return false;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            self.rx.try_recv().is_err()
+        }
+    }
+
+    impl Drop for PointerCapture {
+        fn drop(&mut self) {
+            *super::pointer_capture().lock().unwrap() = None;
+        }
+    }
+
+    async fn authed_client(state: Arc<AppState>) -> (SocketAddr, Client) {
+        let addr = serve(state, "127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let (ws, reply) = open(addr, |n| hello("s3cret", n)).await;
+        assert_eq!(reply.unwrap()["type"], "connected");
+        (addr, ws)
+    }
+
+    #[tokio::test]
+    async fn disconnect_after_press_enqueues_one_release() {
+        let capture = PointerCapture::install().await;
+        let state = AppState::new(test_identity());
+        let (_addr, mut ws) = authed_client(state).await;
+        ws.send(Message::Text(pointer_json(1.5, -2.0, 1, 0).into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            capture.recv().await,
+            vec![handle::Action::Pointer {
+                dx: 1.5,
+                dy: -2.0,
+                buttons: 1,
+                wheel: 0,
+            }]
+        );
+        drop(ws);
+        assert_eq!(capture.recv().await, vec![button_up()]);
+        assert!(capture.quiet(std::time::Duration::from_millis(200)).await);
+    }
+
+    #[tokio::test]
+    async fn button_up_then_disconnect_does_not_release_again() {
+        let capture = PointerCapture::install().await;
+        let state = AppState::new(test_identity());
+        let (_addr, mut ws) = authed_client(state).await;
+        ws.send(Message::Text(pointer_json(1.0, 0.0, 1, 0).into()))
+            .await
+            .unwrap();
+        assert_eq!(capture.recv().await, vec![pointer(1.0, 1, 0)]);
+        ws.send(Message::Text(pointer_json(3.0, 4.0, 0, 0).into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            capture.recv().await,
+            vec![handle::Action::Pointer {
+                dx: 3.0,
+                dy: 4.0,
+                buttons: 0,
+                wheel: 0,
+            }]
+        );
+        drop(ws);
+        assert!(capture.quiet(std::time::Duration::from_millis(200)).await);
+    }
+
+    #[tokio::test]
+    async fn disconnect_without_press_enqueues_nothing() {
+        let capture = PointerCapture::install().await;
+        let state = AppState::new(test_identity());
+        let (_addr, ws) = authed_client(state).await;
+        drop(ws);
+        assert!(capture.quiet(std::time::Duration::from_millis(300)).await);
+    }
+
+    #[tokio::test]
+    async fn pause_forwards_button_up_and_disconnect_does_not_repeat_it() {
+        let capture = PointerCapture::install().await;
+        let state = AppState::new(test_identity());
+        let (_addr, mut ws) = authed_client(state.clone()).await;
+        ws.send(Message::Text(pointer_json(1.0, 0.0, 1, 0).into()))
+            .await
+            .unwrap();
+        assert_eq!(capture.recv().await, vec![pointer(1.0, 1, 0)]);
+        state.set_paused(true);
+        ws.send(Message::Text(pointer_json(8.0, 9.0, 1, 2).into()))
+            .await
+            .unwrap();
+        assert!(capture.quiet(std::time::Duration::from_millis(200)).await);
+        ws.send(Message::Text(pointer_json(8.0, 9.0, 0, 4).into()))
+            .await
+            .unwrap();
+        assert_eq!(capture.recv().await, vec![button_up()]);
+        drop(ws);
+        assert!(capture.quiet(std::time::Duration::from_millis(200)).await);
+    }
+
+    #[tokio::test]
+    async fn secret_reset_and_protocol_error_still_release() {
+        use tokio::io::AsyncWriteExt;
+        let capture = PointerCapture::install().await;
+        let state = AppState::new(test_identity());
+        let (_addr, mut ws) = authed_client(state.clone()).await;
+        ws.send(Message::Text(pointer_json(2.0, 0.0, 1, 0).into()))
+            .await
+            .unwrap();
+        assert_eq!(capture.recv().await, vec![pointer(2.0, 1, 0)]);
+        state.replace_secret("rotated-secret".into());
+        assert_eq!(capture.recv().await, vec![button_up()]);
+
+        let (_addr, mut ws) = authed_client(AppState::new(test_identity())).await;
+        ws.send(Message::Text(pointer_json(2.0, 0.0, 5, 0).into()))
+            .await
+            .unwrap();
+        assert_eq!(capture.recv().await, vec![pointer(2.0, 5, 0)]);
+        {
+            let tokio_tungstenite::MaybeTlsStream::Plain(tcp) = ws.get_mut() else {
+                panic!("expected plain tcp");
+            };
+            // 孤立的 continuation，服务端读帧会出错，走 `?` 退出。
+            tcp.write_all(&[0x80, 0x80, 0, 0, 0, 0]).await.unwrap();
+            tcp.flush().await.unwrap();
+        }
+        assert_eq!(capture.recv().await, vec![button_up()]);
+    }
+
+    #[test]
+    fn queued_release_reaches_fake_apply_intact() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            run_pointer_queue(rx, |batch| {
+                seen_tx.send(batch.to_vec()).unwrap();
+            });
+        });
+        let down = pointer(4.0, 1, 0);
+        let up = button_up();
+        tx.send(vec![down.clone()]).unwrap();
+        tx.send(vec![up.clone()]).unwrap();
+        drop(tx);
+        let mut applied = Vec::new();
+        while let Ok(batch) = seen_rx.recv_timeout(std::time::Duration::from_secs(2)) {
+            applied.extend(batch);
+        }
+        worker.join().unwrap();
+        assert_eq!(applied, vec![down, up]);
     }
 }
