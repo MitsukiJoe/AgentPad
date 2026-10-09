@@ -1,3 +1,5 @@
+#[cfg(windows)]
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -13,6 +15,8 @@ use egui_material_icons::icons::{
 use egui_material_icons::MaterialIcon;
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+#[cfg(any(windows, test))]
+use tray_icon::{MouseButton, MouseButtonState, TrayIconEvent};
 
 use crate::net::{self, Nic, NicKind};
 use crate::protocol::{QrPayload, PORT};
@@ -129,12 +133,54 @@ enum Page {
     About,
 }
 
+fn initial_page() -> Page {
+    #[cfg(windows)]
+    if crate::elevation::handoff_failure().is_some() {
+        return Page::Settings;
+    }
+    Page::Pair
+}
+
+pub fn show_startup_failure(reason: &str) -> eframe::Result {
+    struct StartupFailure(String);
+    impl eframe::App for StartupFailure {
+        fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+            ui.heading("AgentsPads 启动失败");
+            ui.add_space(12.0);
+            ui.label(&self.0);
+            ui.add_space(12.0);
+            ui.label("当前未接收输入。解决问题后重新打开应用。");
+            if ui.button("关闭").clicked() {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
+    let reason = reason.to_string();
+    eframe::run_native(
+        "AgentsPads",
+        eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default().with_inner_size([520.0, 200.0]),
+            ..Default::default()
+        },
+        Box::new(move |cc| {
+            install_fonts(&cc.egui_ctx);
+            Ok(Box::new(StartupFailure(reason)))
+        }),
+    )
+}
+
 pub struct PairingApp {
     state: Arc<AppState>,
     nics: Vec<Nic>,
     selected_ip: String,
     watched: Arc<Mutex<Watched>>,
     menu_rx: std::sync::mpsc::Receiver<MenuEvent>,
+    #[cfg(windows)]
+    tray_rx: std::sync::mpsc::Receiver<TrayIconEvent>,
+    #[cfg(windows)]
+    hwnd: Arc<AtomicIsize>,
+    #[cfg(windows)]
+    ready_published: bool,
     qr_tex: Option<(String, u32, TextureHandle)>,
     tray: Option<TrayIcon>,
     tray_dark: bool,
@@ -195,6 +241,10 @@ impl PairingApp {
             .with_tooltip("AgentsPads")
             .with_menu(Box::new(menu))
             .with_icon(tray_icon(tray_dark));
+        // Default is a menu on left click. Right click still opens it
+        // (tray-icon shows the menu on WM_RBUTTONDOWN).
+        #[cfg(windows)]
+        let builder = builder.with_menu_on_left_click(false);
         let tray = match builder.build() {
             Ok(t) => Some(t),
             Err(_e) => {
@@ -202,12 +252,39 @@ impl PairingApp {
                 None
             }
         };
+        #[cfg(windows)]
+        let hwnd = Arc::new(AtomicIsize::new(0));
+        #[cfg(windows)]
+        let show_id = mi_show.id().clone();
         let (menu_tx, menu_rx) = std::sync::mpsc::channel();
         let wake = cc.egui_ctx.clone();
-        MenuEvent::set_event_handler(Some(move |ev| {
+        #[cfg(windows)]
+        let hwnd_menu = Arc::clone(&hwnd);
+        MenuEvent::set_event_handler(Some(move |ev: MenuEvent| {
+            #[cfg(windows)]
+            if ev.id == show_id {
+                reveal_pairing_window(&hwnd_menu);
+            }
             let _ = menu_tx.send(ev);
             wake.request_repaint();
         }));
+        #[cfg(windows)]
+        let tray_rx = {
+            let (tray_tx, tray_rx) = std::sync::mpsc::channel();
+            let wake = cc.egui_ctx.clone();
+            let hwnd_click = Arc::clone(&hwnd);
+            TrayIconEvent::set_event_handler(Some(move |ev| {
+                // Enter/move/leave fire for the whole hover. Forwarding them
+                // would repaint continuously.
+                if !tray_click_shows_window(&ev) {
+                    return;
+                }
+                reveal_pairing_window(&hwnd_click);
+                let _ = tray_tx.send(ev);
+                wake.request_repaint();
+            }));
+            tray_rx
+        };
         let updater = Arc::new(crate::updater::Updater::new());
         updater.check_for_updates();
         let first = Watched::sample(&state, &updater);
@@ -228,6 +305,12 @@ impl PairingApp {
             selected_ip,
             watched,
             menu_rx,
+            #[cfg(windows)]
+            tray_rx,
+            #[cfg(windows)]
+            hwnd,
+            #[cfg(windows)]
+            ready_published: false,
             qr_tex: None,
             tray,
             tray_dark,
@@ -238,8 +321,8 @@ impl PairingApp {
             mi_logs,
             mi_quit,
             theme,
-            page: Page::Pair,
-            guide_open: !guide_seen(),
+            page: initial_page(),
+            guide_open: initial_page() == Page::Pair && !guide_seen(),
             guide_seeded: false,
             info_rect: egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::splat(36.0)),
             app_icon: None,
@@ -309,7 +392,34 @@ impl PairingApp {
         )
     }
 
+    #[cfg(windows)]
+    fn capture_hwnd(&mut self, frame: &eframe::Frame) {
+        let Some(window) = frame.winit_window() else {
+            return;
+        };
+        use winit::raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
+        let Ok(handle) = window.window_handle() else {
+            return;
+        };
+        if let RawWindowHandle::Win32(win) = handle.as_raw() {
+            self.hwnd.store(win.hwnd.get(), Ordering::Release);
+            if !self.ready_published
+                && crate::elevation::relaunched()
+                && crate::elevation::is_elevated()
+            {
+                if crate::elevation::publish_ready(win.hwnd.get()).is_err() {
+                    crate::elevation::note_startup_failure("ready verification failed", "");
+                    crate::handle::stop_input();
+                    std::process::exit(1);
+                }
+                self.ready_published = true;
+            }
+        }
+    }
+
     fn show_window(&mut self, ctx: &egui::Context) {
+        #[cfg(windows)]
+        reveal_pairing_window(&self.hwnd);
         self.hidden = false;
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
@@ -323,6 +433,16 @@ impl PairingApp {
     }
 
     fn poll_tray(&mut self, ctx: &egui::Context) {
+        #[cfg(windows)]
+        {
+            let mut show = false;
+            while self.tray_rx.try_recv().is_ok() {
+                show = true;
+            }
+            if show {
+                self.show_window(ctx);
+            }
+        }
         while let Ok(ev) = self.menu_rx.try_recv() {
             if ev.id == self.mi_show.id() {
                 self.show_window(ctx);
@@ -334,6 +454,8 @@ impl PairingApp {
                 crate::logutil::open_dir();
             } else if ev.id == self.mi_quit.id() {
                 self.quit = true;
+                #[cfg(windows)]
+                crate::handle::stop_input();
                 crate::logutil::write("quit from tray");
                 ctx.request_repaint();
                 // Hidden pairing window: Viewport Close is often ignored once on
@@ -395,7 +517,22 @@ impl PairingApp {
 }
 
 impl eframe::App for PairingApp {
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Publish the HWND before poll_tray. A hidden window may skip `ui`,
+        // and show_window in this same turn is what syncs egui after the click.
+        #[cfg(windows)]
+        {
+            self.capture_hwnd(frame);
+            if self.hidden
+                && frame
+                    .winit_window()
+                    .is_some_and(|window| window.is_visible() == Some(true))
+            {
+                self.show_window(ctx);
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = frame;
         self.tick(ctx);
     }
 
@@ -992,7 +1129,11 @@ impl PairingApp {
                     if switch_block(
                         ui,
                         "以管理员模式启动",
-                        "允许控制任务管理器等管理员窗口",
+                        if crate::elevation::is_elevated() {
+                            "当前已提权，可控制管理员窗口"
+                        } else {
+                            "当前普通权限，无法控制管理员窗口"
+                        },
                         Some(ADMIN_HELP),
                         "admin",
                         &mut on,
@@ -1001,6 +1142,7 @@ impl PairingApp {
                         // Switching changes the pairing key, so ask first.
                         self.admin_confirm = Some(on);
                     }
+                    admin_handoff_warning(ui, p);
                 }
             },
         );
@@ -1539,6 +1681,10 @@ impl PairingApp {
             self.admin_confirm = None;
             if confirmed {
                 self.set_run_as_admin(on);
+                // 交接进程没拉起来时，这一帧设置页已经画完，补一帧把警告画出来。
+                if crate::elevation::handoff_failure().is_some() {
+                    ctx.request_repaint();
+                }
             }
         }
     }
@@ -1547,9 +1693,12 @@ impl PairingApp {
     fn set_run_as_admin(&mut self, on: bool) {
         use crate::elevation;
         // 开机启动的当前选择随任务带过去；管理员模式下它由计划任务的登录触发负责。
-        if on && !elevation::install_task(crate::autostart::enabled()) {
-            crate::logutil::write("admin task install failed");
-            return;
+        if on {
+            if let Err(reason) = elevation::install_task(crate::autostart::enabled()) {
+                elevation::note_handoff_failure(reason);
+                crate::logutil::write("admin task install failed");
+                return;
+            }
         }
         if !on {
             elevation::remove_task();
@@ -1559,8 +1708,15 @@ impl PairingApp {
         // 撤掉用户 Startup 里的旧项（管理员模式下由登录触发接管）；提权进程里这是空操作。
         crate::autostart::apply();
         self.autostart_enabled = crate::autostart::enabled();
-        if on && self.run_as_admin && !elevation::is_elevated() && elevation::run_task() {
-            std::process::exit(0);
+        if on && self.run_as_admin && !elevation::is_elevated() {
+            // 新的普通进程等本进程退出、端口释放后再走 main 里的交接。
+            // schtasks /Run 成功只代表任务已排队，不能在这里直接退出。
+            if elevation::spawn_unelevated_handoff() {
+                crate::handle::stop_input();
+                std::process::exit(0);
+            }
+            elevation::note_handoff_failure("无法重新打开窗口");
+            crate::logutil::write("admin handoff spawn failed");
         }
     }
 }
@@ -1711,6 +1867,29 @@ fn labeled_block(
         p.muted,
     );
     row
+}
+
+#[cfg(windows)]
+fn admin_handoff_warning(ui: &mut egui::Ui, p: Pal) {
+    let Some(reason) = crate::elevation::handoff_failure() else {
+        return;
+    };
+    ui.add_space(8.0);
+    let privilege = if crate::elevation::is_elevated() {
+        "当前已提权"
+    } else {
+        "当前普通权限"
+    };
+    let text = format!("管理员模式操作未完成，{privilege}：{reason}");
+    let width = ui.available_width();
+    let mut job = egui::text::LayoutJob::single_section(
+        text,
+        egui::TextFormat::simple(egui::FontId::proportional(12.0), p.warn),
+    );
+    job.wrap.max_width = width;
+    let galley = ui.painter().layout_job(job);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, galley.size().y), egui::Sense::hover());
+    ui.painter().galley(rect.min, galley, p.warn);
 }
 
 fn switch_block(
@@ -2543,6 +2722,43 @@ fn tray_icon(dark: bool) -> Icon {
     Icon::from_rgba(icon.rgba, icon.width, icon.height).expect("valid tray icon")
 }
 
+/// Left button-up shows the window. A double-click arrives as its own event
+/// between the two ups (not a second down); showing on it is idempotent.
+/// Right-click stays the menu.
+#[cfg(any(windows, test))]
+fn tray_click_shows_window(ev: &TrayIconEvent) -> bool {
+    matches!(
+        ev,
+        TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+            ..
+        } | TrayIconEvent::DoubleClick {
+            button: MouseButton::Left,
+            ..
+        }
+    )
+}
+
+/// Restore immediately from the native tray callback; App::logic then syncs egui.
+#[cfg(windows)]
+fn reveal_pairing_window(slot: &AtomicIsize) {
+    let raw = slot.load(Ordering::Acquire);
+    if raw == 0 {
+        return;
+    }
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
+    };
+    let hwnd = HWND(raw as *mut std::ffi::c_void);
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_RESTORE);
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = SetForegroundWindow(hwnd);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2569,6 +2785,48 @@ mod tests {
         assert_eq!((light.width, light.height), (1024, 1024));
         assert_eq!((dark.width, dark.height), (1024, 1024));
         assert_ne!(light.rgba, dark.rgba);
+    }
+
+    #[test]
+    fn tray_left_release_shows_and_right_click_does_not() {
+        fn click(button: MouseButton, state: MouseButtonState) -> TrayIconEvent {
+            TrayIconEvent::Click {
+                id: tray_icon::TrayIconId::new("t"),
+                position: Default::default(),
+                rect: Default::default(),
+                button,
+                button_state: state,
+            }
+        }
+        assert!(tray_click_shows_window(&click(
+            MouseButton::Left,
+            MouseButtonState::Up
+        )));
+        assert!(!tray_click_shows_window(&click(
+            MouseButton::Left,
+            MouseButtonState::Down
+        )));
+        assert!(!tray_click_shows_window(&click(
+            MouseButton::Right,
+            MouseButtonState::Up
+        )));
+        assert!(tray_click_shows_window(&TrayIconEvent::DoubleClick {
+            id: tray_icon::TrayIconId::new("t"),
+            position: Default::default(),
+            rect: Default::default(),
+            button: MouseButton::Left,
+        }));
+        assert!(!tray_click_shows_window(&TrayIconEvent::DoubleClick {
+            id: tray_icon::TrayIconId::new("t"),
+            position: Default::default(),
+            rect: Default::default(),
+            button: MouseButton::Right,
+        }));
+        assert!(!tray_click_shows_window(&TrayIconEvent::Enter {
+            id: tray_icon::TrayIconId::new("t"),
+            position: Default::default(),
+            rect: Default::default(),
+        }));
     }
 
     #[test]

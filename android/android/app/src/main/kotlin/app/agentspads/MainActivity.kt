@@ -1,6 +1,9 @@
 package app.agentspads
 
+import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.media.AudioManager
@@ -48,6 +51,9 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         super.onCreate(savedInstanceState)
+        if (savedInstanceState == null) {
+            runCatching { LauncherIcon.onColdStart(this) }
+        }
         inputView = BackspaceFlutterView(this) { ws?.emitInputBackspace() }.also { view ->
             view.id = FLUTTER_VIEW_ID
             view.addOnFirstFrameRenderedListener(object : FlutterUiDisplayListener {
@@ -345,40 +351,32 @@ class WifiWs(
                     "setAppIcon" -> {
                         val icon = call.argument<String>("icon") ?: "white"
                         try {
-                            val pm = ctx.packageManager
-                            val pkg = ctx.packageName
-                            val defaultComponent = android.content.ComponentName(pkg, "$pkg.MainActivity")
-                            val blackComponent = android.content.ComponentName(pkg, "$pkg.MainActivityBlack")
-
-                            // 刚安装时组件为 DEFAULT 态（非显式 ENABLED/DISABLED），
-                            // 若按查询结果跳过写入，会漏禁用另一入口导致桌面出现双图标；
-                            // 这里无条件把两个组件写成目标状态，幂等且可自愈历史脏数据。
-                            if (icon == "black") {
-                                pm.setComponentEnabledSetting(
-                                    blackComponent,
-                                    android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
-                                    android.content.pm.PackageManager.DONT_KILL_APP
-                                )
-                                pm.setComponentEnabledSetting(
-                                    defaultComponent,
-                                    android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
-                                    android.content.pm.PackageManager.DONT_KILL_APP
-                                )
-                            } else {
-                                pm.setComponentEnabledSetting(
-                                    defaultComponent,
-                                    android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
-                                    android.content.pm.PackageManager.DONT_KILL_APP
-                                )
-                                pm.setComponentEnabledSetting(
-                                    blackComponent,
-                                    android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
-                                    android.content.pm.PackageManager.DONT_KILL_APP
-                                )
-                            }
-                            result.success(true)
+                            result.success(LauncherIcon.setPending(ctx, icon))
                         } catch (e: Exception) {
                             result.error("ICON_CHANGE_FAILED", e.message, null)
+                        }
+                    }
+                    "getAppIconState" -> {
+                        try {
+                            result.success(LauncherIcon.state(ctx))
+                        } catch (e: Exception) {
+                            result.error("ICON_STATE_FAILED", e.message, null)
+                        }
+                    }
+                    "finishWithAppIcon" -> {
+                        try {
+                            LauncherIcon.finish(ctx as android.app.Activity)
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("ICON_FINISH_FAILED", e.message, null)
+                        }
+                    }
+                    "restartWithAppIcon" -> {
+                        try {
+                            LauncherIcon.restart(ctx as android.app.Activity)
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("ICON_RESTART_FAILED", e.message, null)
                         }
                     }
                     "openUrl" -> {
@@ -649,4 +647,127 @@ private fun num(call: MethodCall, key: String): Double {
 private fun intNum(call: MethodCall, key: String): Int {
     val v = call.argument<Any>(key) ?: return 0
     return if (v is Number) v.toInt() else 0
+}
+
+internal object LauncherIcon {
+    private const val PREFS = "agentpad_app_icon"
+    private const val PENDING = "pending_app_icon"
+
+    /** 启动过程中改 alias 会把这次界面收掉，这里只把真实 Activity 恢复成默认启用。 */
+    fun onColdStart(activity: android.app.Activity) {
+        restoreActivity(activity)
+    }
+
+    fun finish(activity: android.app.Activity) {
+        applyPending(activity)
+        activity.finish()
+    }
+
+    fun restart(activity: android.app.Activity) {
+        val target = readPending(activity) ?: current(activity)
+        savePending(activity, target)
+        applyAliases(activity, target)
+        // 先结束旧实例，避免 singleTop 将重启交回正在退出的窗口。
+        activity.finishAndRemoveTask()
+        activity.startActivity(Intent(activity, MainActivity::class.java).addFlags(
+            Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_MULTIPLE_TASK,
+        ))
+        clearPending(activity)
+    }
+
+    private fun applyPending(ctx: Context) {
+        val pending = readPending(ctx) ?: return
+        applyAliases(ctx, pending)
+        clearPending(ctx)
+    }
+
+    /** 只记录待切换。返回值表示待切换与当前生效图标不同。 */
+    fun setPending(ctx: Context, icon: String): Boolean {
+        val target = if (icon == "black") "black" else "white"
+        if (isApplied(ctx, target)) {
+            clearPending(ctx)
+            return false
+        }
+        savePending(ctx, target)
+        return true
+    }
+
+    private fun savePending(ctx: Context, target: String) {
+        val previous = readPending(ctx)
+        if (!prefs(ctx).edit().putString(PENDING, target).commit()) {
+            prefs(ctx).edit().putString(PENDING, previous).commit()
+            error("无法保存图标设置")
+        }
+    }
+
+    fun state(ctx: Context): Map<String, String?> {
+        val now = current(ctx)
+        val pending = readPending(ctx)
+        return mapOf("current" to now, "pending" to pending)
+    }
+
+    private fun applyAliases(ctx: Context, target: String): ComponentName {
+        val black = target == "black"
+        val enable = component(ctx, if (black) "MainActivityBlack" else "MainActivityWhite")
+        val disable = component(ctx, if (black) "MainActivityWhite" else "MainActivityBlack")
+        setEnabled(ctx, enable, PackageManager.COMPONENT_ENABLED_STATE_ENABLED)
+        setEnabled(ctx, disable, PackageManager.COMPONENT_ENABLED_STATE_DISABLED)
+        restoreActivity(ctx)
+        check(ctx.packageManager.getComponentEnabledSetting(enable) == PackageManager.COMPONENT_ENABLED_STATE_ENABLED &&
+            ctx.packageManager.getComponentEnabledSetting(disable) == PackageManager.COMPONENT_ENABLED_STATE_DISABLED) {
+            "图标切换未生效"
+        }
+        return enable
+    }
+
+    private fun restoreActivity(ctx: Context) {
+        setEnabled(
+            ctx,
+            component(ctx, "MainActivity"),
+            PackageManager.COMPONENT_ENABLED_STATE_DEFAULT,
+        )
+    }
+
+    private fun setEnabled(ctx: Context, component: ComponentName, state: Int) {
+        val pm = ctx.packageManager
+        if (pm.getComponentEnabledSetting(component) == state) return
+        pm.setComponentEnabledSetting(component, state, PackageManager.DONT_KILL_APP)
+    }
+
+    /** 黑图标仅当 Black alias 被显式 ENABLED。DEFAULT 按清单视为未启用。 */
+    private fun current(ctx: Context): String {
+        val state = ctx.packageManager.getComponentEnabledSetting(component(ctx, "MainActivityBlack"))
+        return if (state == PackageManager.COMPONENT_ENABLED_STATE_ENABLED) "black" else "white"
+    }
+
+    private fun isApplied(ctx: Context, target: String): Boolean {
+        fun enabled(name: String, default: Boolean): Boolean =
+            when (ctx.packageManager.getComponentEnabledSetting(component(ctx, name))) {
+                PackageManager.COMPONENT_ENABLED_STATE_ENABLED -> true
+                PackageManager.COMPONENT_ENABLED_STATE_DEFAULT -> default
+                else -> false
+            }
+        val black = enabled("MainActivityBlack", false)
+        val white = enabled("MainActivityWhite", true)
+        return if (target == "black") black && !white else white && !black
+    }
+
+    private fun readPending(ctx: Context): String? {
+        val value = prefs(ctx).getString(PENDING, null)
+        return if (value == "white" || value == "black") value else null
+    }
+
+    private fun clearPending(ctx: Context) {
+        val previous = readPending(ctx)
+        if (!prefs(ctx).edit().remove(PENDING).commit()) {
+            prefs(ctx).edit().putString(PENDING, previous).commit()
+            error("无法保存图标状态")
+        }
+    }
+
+    private fun prefs(ctx: Context) =
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    private fun component(ctx: Context, simpleName: String) =
+        ComponentName(ctx.packageName, "${MainActivity::class.java.packageName}.$simpleName")
 }

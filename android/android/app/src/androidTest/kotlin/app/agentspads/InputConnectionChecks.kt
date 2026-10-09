@@ -13,18 +13,65 @@ import android.view.inputmethod.InputConnection
 import io.flutter.embedding.android.FlutterActivity
 
 class InputConnectionChecks : Instrumentation() {
+    private var checkIconRestart = false
+    private var lastLaunch = ""
+
     override fun onCreate(arguments: Bundle?) {
         super.onCreate(arguments)
+        checkIconRestart = arguments?.getString("check") == "icon-restart"
         start()
     }
 
     override fun onStart() {
         val result = Bundle()
         try {
+            if (checkIconRestart) {
+                targetContext.getSystemService(android.app.ActivityManager::class.java).appTasks
+                    .forEach { it.finishAndRemoveTask() }
+            }
             val activity = startActivitySync(
                 checkNotNull(targetContext.packageManager.getLaunchIntentForPackage(targetContext.packageName))
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             ) as MainActivity
+            if (checkIconRestart) {
+                val original = LauncherIcon.state(activity).getValue("current")!!
+                var previous = activity
+                for (target in listOf(if (original == "white") "black" else "white", original)) {
+                    val oldTask = previous.taskId
+                    val observer = object : ActivityMonitor() {
+                        override fun onStartActivity(intent: Intent): ActivityResult? {
+                            lastLaunch = "${intent.component}, flags=${intent.flags}"
+                            return null
+                        }
+                    }
+                    addMonitor(observer)
+                    val monitor = addMonitor(MainActivity::class.java.name, null, false)
+                    try {
+                        runOnMainSync {
+                            LauncherIcon.setPending(previous, target)
+                            LauncherIcon.restart(previous)
+                        }
+                        val restarted = checkNotNull(waitForMonitorWithTimeout(monitor, 5000)) as MainActivity
+                        check(restarted.taskId != oldTask) { "Restart reused the disabled launcher's task" }
+                        SystemClock.sleep(1500)
+                        check(!restarted.isFinishing && !restarted.isDestroyed) { "Restarted activity was closed" }
+                        check(uiAutomation.rootInActiveWindow?.packageName == targetContext.packageName) {
+                            "Restart did not retain the foreground window"
+                        }
+                        val tasks = targetContext.getSystemService(android.app.ActivityManager::class.java).appTasks
+                        check(tasks.size == 1) { "Restart left ${tasks.size} app tasks" }
+                        check(tasks.single().taskInfo.baseIntent.component?.className == MainActivity::class.java.name)
+                        check(LauncherIcon.state(restarted).getValue("current") == target)
+                        previous = restarted
+                    } finally {
+                        removeMonitor(monitor)
+                        removeMonitor(observer)
+                    }
+                }
+                result.putString("stream", "OK: icon restart creates one visible task and retires the disabled alias (2 directions)\n")
+                finish(Activity.RESULT_OK, result)
+                return
+            }
             val view = activity.findViewById<BackspaceFlutterView>(FlutterActivity.FLUTTER_VIEW_ID)
             uiAutomation
             var focusedEditor = false
@@ -102,7 +149,7 @@ class InputConnectionChecks : Instrumentation() {
             result.putString("stream", "OK: real Flutter InputConnection; empty/last-char/codepoint/no-op/composing/selection/paste/repeat (8 checks)\n")
             finish(Activity.RESULT_OK, result)
         } catch (error: Throwable) {
-            result.putString("stream", "FAILURE: ${error.stackTraceToString()}\n")
+            result.putString("stream", "FAILURE: ${error.stackTraceToString()}\nLast launch: $lastLaunch\n")
             finish(Activity.RESULT_CANCELED, result)
         }
     }
